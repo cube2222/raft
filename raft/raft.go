@@ -62,7 +62,8 @@ func NewRaft(applyable Applyable, name, advertiseAddress, clusterAddress string)
 		clusterAddress,
 	)
 	if err != nil {
-		return nil, errors.Wrap(err, "Couldn't read environment variables.")
+		log.Printf("Name: %v, AdvertiseAddress: %v, ClusterAddress: %v", name, advertiseAddress, clusterAddress)
+		return nil, errors.Wrap(err, "Couldn't setup cluster.")
 	}
 
 	curTermContext, cancel := context.WithCancel(context.Background())
@@ -93,6 +94,14 @@ func NewRaft(applyable Applyable, name, advertiseAddress, clusterAddress string)
 	return raftInstance, nil
 }
 
+func (r *Raft) Run() {
+	for range time.Tick(time.Millisecond * 50) {
+		if err := r.Tick(); err != nil {
+			log.Printf("Error when ticking: %v", err)
+		}
+	}
+}
+
 func (r *Raft) Close() {
 	r.cluster.Leave()
 }
@@ -100,6 +109,8 @@ func (r *Raft) Close() {
 func setupCluster(nodeName string, advertiseAddr string, clusterAddr string) (*serf.Serf, error) {
 	conf := serf.DefaultConfig()
 	conf.Init()
+
+	conf.MemberlistConfig.Name = nodeName
 	conf.MemberlistConfig.AdvertiseAddr = advertiseAddr
 
 	cluster, err := serf.Create(conf)
