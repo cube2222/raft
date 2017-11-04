@@ -45,10 +45,7 @@ type Raft struct {
 	lastApplied int64
 
 	// On leader, reinitialized after collection
-	nextIndex         map[string]int64 // Reinitialize to last log index + 1 for everybody
-	matchIndex        map[string]int64 // Reinitiallize to 0 for everybody
-	lastAppendEntries map[string]time.Time
-	// TODO: Mutex
+	leaderData *leaderData
 
 	// On non-leader
 	electionTimeout time.Time
@@ -83,9 +80,7 @@ func NewRaft(applyable Applyable, name, advertiseAddress, clusterAddress string)
 		commitIndex: 0,
 		lastApplied: 0,
 
-		nextIndex:         make(map[string]int64),
-		matchIndex:        make(map[string]int64),
-		lastAppendEntries: make(map[string]time.Time),
+		leaderData: NewLeaderData(0),
 
 		electionTimeout: time.Now().Add(time.Millisecond * time.Duration(1000+rand.Intn(2000))),
 	}
@@ -95,7 +90,7 @@ func NewRaft(applyable Applyable, name, advertiseAddress, clusterAddress string)
 
 func (r *Raft) Run() {
 	go func(raft *Raft) {
-		for range time.Tick(time.Second) {
+		for range time.Tick(time.Second*3) {
 			log.Printf("***** %v is Leader with term %v", raft.leaderID, raft.curTerm)
 		}
 	}(r)
@@ -265,18 +260,7 @@ func (r *Raft) InitializeLeadership(ctx context.Context) {
 	r.curRole = Leader
 	r.leaderID = r.cluster.LocalMember().Name
 
-	beginningNextIndex := r.log.MaxIndex() + 1
-
-	nextIndex := make(map[string]int64)
-	for _, node := range r.cluster.Members() {
-		if node.Name != r.cluster.LocalMember().Name {
-			nextIndex[node.Name] = beginningNextIndex
-		}
-	}
-
-	r.nextIndex = nextIndex
-	r.matchIndex = make(map[string]int64)
-	r.lastAppendEntries = make(map[string]time.Time)
+	r.leaderData = NewLeaderData(r.log.MaxIndex())
 }
 
 func (r *Raft) PropagateMessages(ctx context.Context) {
@@ -284,12 +268,12 @@ func (r *Raft) PropagateMessages(ctx context.Context) {
 	wg.Add(r.cluster.NumNodes() - 1)
 	for _, node := range r.cluster.Members() {
 		if node.Name != r.cluster.LocalMember().Name && node.Status == serf.StatusAlive {
-			if r.lastAppendEntries[node.Name].IsZero() {
+			if r.leaderData.GetLastAppendEntries(node.Name).IsZero() {
 				go func(node serf.Member) {
 					r.SendAppendEntries(ctx, node.Name, fmt.Sprintf("%v:%v", node.Addr, 8001), true)
 					wg.Done()
 				}(node)
-			} else if r.log.MaxIndex() >= r.nextIndex[node.Name] || time.Since(r.lastAppendEntries[node.Name]) < time.Millisecond*200 {
+			} else if r.log.MaxIndex() >= r.leaderData.GetNextIndex(node.Name) || time.Since(r.leaderData.GetLastAppendEntries(node.Name)) < time.Millisecond*200 {
 				go func(node serf.Member) {
 					r.SendAppendEntries(ctx, node.Name, fmt.Sprintf("%v:%v", node.Addr, 8001), false)
 					wg.Done()
@@ -301,7 +285,6 @@ func (r *Raft) PropagateMessages(ctx context.Context) {
 }
 
 func (r *Raft) SendAppendEntries(ctx context.Context, nodeID string, address string, empty bool) {
-	log.Printf("Sending append entries to %v", nodeID)
 	conn, err := grpc.Dial(address, grpc.WithInsecure())
 	if err != nil {
 		log.Printf("Error when dialing to send append entries: %v", err)
@@ -311,7 +294,7 @@ func (r *Raft) SendAppendEntries(ctx context.Context, nodeID string, address str
 
 	cli := raft.NewRaftClient(conn)
 
-	nextIndex := r.nextIndex[nodeID]
+	nextIndex := r.leaderData.GetNextIndex(nodeID)
 	prevIndex := nextIndex - 1
 	var prevTerm int64 = 0
 	entry, _ := r.log.Get(prevIndex)
@@ -342,7 +325,7 @@ func (r *Raft) SendAppendEntries(ctx context.Context, nodeID string, address str
 		return
 	}
 
-	r.lastAppendEntries[nodeID] = time.Now()
+	r.leaderData.NoteAppendEntries(nodeID)
 
 	if res.Term < r.curTerm {
 		if r.curTerm < res.Term {
@@ -358,12 +341,11 @@ func (r *Raft) SendAppendEntries(ctx context.Context, nodeID string, address str
 	}
 
 	if res.Success {
-		// TODO: Ojoj, tu powinny być mutexy od razu per node, bo inaczej to się wyjebie od razu, z wieloma równoległymi requestami.
-		r.nextIndex[nodeID] = nextIndex + 1
-		r.matchIndex[nodeID] = nextIndex
+		r.leaderData.SetNextIndex(nodeID, nextIndex, nextIndex + 1)
+		r.leaderData.NoteMatchIndex(nodeID, nextIndex)
 	} else {
 		if nextIndex != 1 {
-			r.nextIndex[nodeID] = nextIndex - 1
+			r.leaderData.SetNextIndex(nodeID, nextIndex, nextIndex - 1)
 		}
 	}
 }
@@ -386,7 +368,7 @@ func (r *Raft) UpdateCommitIndex() {
 		oks := 1
 		for _, node := range r.cluster.Members() {
 			if node.Name != r.cluster.LocalMember().Name {
-				if r.matchIndex[node.Name] >= candidate {
+				if r.leaderData.GetMatchIndex(node.Name) >= candidate {
 					oks += 1
 				}
 			}
@@ -497,6 +479,8 @@ func (r *Raft) RequestVote(ctx context.Context, req *raft.RequestVoteRequest) (*
 		if req.LastLogIndex >= curLastLogIndex && req.LastLogTerm >= curLastLogTerm {
 
 			r.votedFor = req.CandidateID
+
+			log.Printf("****** Voting for: %v ******", r.votedFor)
 
 			return &raft.RequestVoteResponse{
 				Term:        r.curTerm,
