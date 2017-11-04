@@ -11,7 +11,6 @@ import (
 	"sync"
 	"fmt"
 	"google.golang.org/grpc"
-	"strings"
 )
 
 type role int
@@ -160,6 +159,7 @@ func (r *Raft) Tick() error {
 }
 
 func (r *Raft) StartElection() {
+	log.Println("*********** Starting election **************")
 	r.curTermContextCancel()
 
 	r.curTerm += 1
@@ -174,7 +174,7 @@ func (r *Raft) StartElection() {
 
 	for _, node := range r.cluster.Members() {
 		if node.Name != r.cluster.LocalMember().Name && node.Status == serf.StatusAlive {
-			go r.AskForVote(ctx, fmt.Sprintf("%v:%v", node.Addr, strings.Split(node.Name, "-")[1]), votesChan)
+			go r.AskForVote(ctx, fmt.Sprintf("%v:%v", node.Addr, 8001), votesChan)
 		}
 	}
 
@@ -194,6 +194,7 @@ func (r *Raft) StartElection() {
 				bContinue = false
 			}
 		case <-r.curTermContext.Done():
+			log.Println("************* Election aborted ****************")
 			go drainChannel(votesChan, r.clusterSize-1-answersReceived)
 			return
 		}
@@ -251,6 +252,7 @@ func drainChannel(ch <-chan bool, count int) {
 }
 
 func (r *Raft) InitializeLeadership(ctx context.Context) {
+	log.Println("*************** I'm becoming leader! ******************")
 	r.curRole = Leader
 
 	beginningNextIndex := r.log.MaxIndex() + 1
@@ -271,9 +273,9 @@ func (r *Raft) PropagateMessages(ctx context.Context) {
 	for _, node := range r.cluster.Members() {
 		if node.Name != r.cluster.LocalMember().Name {
 			if r.lastAppendEntries[node.Name].IsZero() {
-				go r.SendAppendEntries(ctx, node.Name, fmt.Sprintf("%v:%v", node.Addr, strings.Split(node.Name, "-")[1]), true)
+				go r.SendAppendEntries(ctx, node.Name, fmt.Sprintf("%v:%v", node.Addr, 8001), true)
 			} else if r.log.MaxIndex() >= r.nextIndex[node.Name] || time.Since(r.lastAppendEntries[node.Name]) < time.Millisecond*200 {
-				go r.SendAppendEntries(ctx, node.Name, fmt.Sprintf("%v:%v", node.Addr, strings.Split(node.Name, "-")[1]), false)
+				go r.SendAppendEntries(ctx, node.Name, fmt.Sprintf("%v:%v", node.Addr, 8001), false)
 			}
 		}
 	}
@@ -284,6 +286,7 @@ func (r *Raft) SendAppendEntries(ctx context.Context, nodeID string, address str
 	conn, err := grpc.Dial(address, grpc.WithInsecure())
 	if err != nil {
 		log.Printf("Error when dialing to send append entries: %v", err)
+		return
 	}
 	defer conn.Close()
 
@@ -317,6 +320,7 @@ func (r *Raft) SendAppendEntries(ctx context.Context, nodeID string, address str
 	})
 	if err != nil {
 		log.Printf("Couldn't send append entries: %v", err)
+		return
 	}
 
 	r.lastAppendEntries[nodeID] = time.Now()
@@ -487,7 +491,7 @@ func (r *Raft) NewEntry(ctx context.Context, entry *raft.Entry) (*raft.EntryResp
 	if r.curRole != Leader {
 		for _, node := range r.cluster.Members() {
 			log.Printf("Redirecting new entry to leader: %v", r.leaderID)
-			conn, err := grpc.Dial(fmt.Sprintf("%v:%v", node.Addr, strings.Split(node.Name, "-")[1]), grpc.WithInsecure())
+			conn, err := grpc.Dial(fmt.Sprintf("%v:%v", node.Addr, 8001), grpc.WithInsecure())
 			if err != nil {
 				log.Printf("Error when dialing to send append entries: %v", err)
 				return nil, err

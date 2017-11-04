@@ -21,16 +21,21 @@ func main() {
 	myApplyable := &MyApplyable{}
 
 	clusterAddress := ""
-	if len(os.Args) == 4 {
-		clusterAddress = os.Args[3]
+	if len(os.Args) == 3 {
+		clusterAddress = os.Args[2]
 	}
 
-	myRaft, err := raft.NewRaft(myApplyable, os.Args[1], os.Args[2], clusterAddress)
+	hostname, err := os.Hostname()
+	if err != nil {
+		log.Fatal("Couldn't get hostname")
+	}
+
+	myRaft, err := raft.NewRaft(myApplyable, hostname, os.Args[1], clusterAddress)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	lis, err := net.Listen("tcp", ":")
+	lis, err := net.Listen("tcp", ":8001")
 	if err != nil {
 		log.Fatal(err)
 	}
