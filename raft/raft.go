@@ -94,6 +94,12 @@ func NewRaft(applyable Applyable, name, advertiseAddress, clusterAddress string)
 }
 
 func (r *Raft) Run() {
+	go func(raft *Raft) {
+		for range time.Tick(time.Second) {
+			log.Printf("***** %v is Leader with term %v", raft.leaderID, raft.curTerm)
+		}
+	}(r)
+
 	for range time.Tick(time.Millisecond * 50) {
 		if err := r.Tick(); err != nil {
 			log.Printf("Error when ticking: %v", err)
@@ -163,6 +169,7 @@ func (r *Raft) StartElection() {
 	r.curTermContextCancel()
 
 	r.curTerm += 1
+	r.leaderID = ""
 	r.electionTimeout = time.Now().Add(time.Millisecond * time.Duration(1000+rand.Intn(2000)))
 	ctx, cancel := context.WithCancel(context.Background())
 	r.curTermContext, r.curTermContextCancel = ctx, cancel
@@ -234,6 +241,8 @@ func (r *Raft) AskForVote(ctx context.Context, address string, voteChan chan<- b
 	}
 
 	if r.curTerm < res.Term {
+		log.Println("Becoming follower because of term override")
+		r.electionTimeout = time.Now().Add(time.Millisecond * time.Duration(1000+rand.Intn(2000)))
 		voteChan <- false
 		r.curTermContextCancel()
 		r.curTermContext, r.curTermContextCancel = context.WithCancel(context.Background())
@@ -252,8 +261,9 @@ func drainChannel(ch <-chan bool, count int) {
 }
 
 func (r *Raft) InitializeLeadership(ctx context.Context) {
-	log.Println("*************** I'm becoming leader! ******************")
+	log.Printf("*************** I'm becoming leader! Term: %v ******************", r.curTerm)
 	r.curRole = Leader
+	r.leaderID = r.cluster.LocalMember().Name
 
 	beginningNextIndex := r.log.MaxIndex() + 1
 
@@ -270,15 +280,24 @@ func (r *Raft) InitializeLeadership(ctx context.Context) {
 }
 
 func (r *Raft) PropagateMessages(ctx context.Context) {
+	wg := sync.WaitGroup{}
+	wg.Add(r.cluster.NumNodes() - 1)
 	for _, node := range r.cluster.Members() {
-		if node.Name != r.cluster.LocalMember().Name {
+		if node.Name != r.cluster.LocalMember().Name && node.Status == serf.StatusAlive {
 			if r.lastAppendEntries[node.Name].IsZero() {
-				go r.SendAppendEntries(ctx, node.Name, fmt.Sprintf("%v:%v", node.Addr, 8001), true)
+				go func(node serf.Member) {
+					r.SendAppendEntries(ctx, node.Name, fmt.Sprintf("%v:%v", node.Addr, 8001), true)
+					wg.Done()
+				}(node)
 			} else if r.log.MaxIndex() >= r.nextIndex[node.Name] || time.Since(r.lastAppendEntries[node.Name]) < time.Millisecond*200 {
-				go r.SendAppendEntries(ctx, node.Name, fmt.Sprintf("%v:%v", node.Addr, 8001), false)
+				go func(node serf.Member) {
+					r.SendAppendEntries(ctx, node.Name, fmt.Sprintf("%v:%v", node.Addr, 8001), false)
+					wg.Done()
+				}(node)
 			}
 		}
 	}
+	wg.Wait()
 }
 
 func (r *Raft) SendAppendEntries(ctx context.Context, nodeID string, address string, empty bool) {
@@ -327,6 +346,8 @@ func (r *Raft) SendAppendEntries(ctx context.Context, nodeID string, address str
 
 	if res.Term < r.curTerm {
 		if r.curTerm < res.Term {
+			log.Println("Becoming follower because of term override")
+			r.electionTimeout = time.Now().Add(time.Millisecond * time.Duration(1000+rand.Intn(2000)))
 			r.curTermContextCancel()
 			r.curTermContext, r.curTermContextCancel = context.WithCancel(context.Background())
 			r.curTerm = res.Term
@@ -341,7 +362,9 @@ func (r *Raft) SendAppendEntries(ctx context.Context, nodeID string, address str
 		r.nextIndex[nodeID] = nextIndex + 1
 		r.matchIndex[nodeID] = nextIndex
 	} else {
-		r.nextIndex[nodeID] = nextIndex - 1
+		if nextIndex != 1 {
+			r.nextIndex[nodeID] = nextIndex - 1
+		}
 	}
 }
 
@@ -384,6 +407,7 @@ func (r *Raft) AppendEntries(ctx context.Context, req *raft.AppendEntriesRequest
 	}
 
 	if r.curTerm < req.Term {
+		log.Println("Becoming follower because of term override")
 		r.curTermContextCancel()
 		r.curTermContext, r.curTermContextCancel = context.WithCancel(context.Background())
 		r.curTerm = req.Term
@@ -402,7 +426,7 @@ func (r *Raft) AppendEntries(ctx context.Context, req *raft.AppendEntriesRequest
 	r.leaderID = req.LeaderID
 	r.electionTimeout = time.Now().Add(time.Millisecond * time.Duration(1000+rand.Intn(2000)))
 
-	if !r.log.Exists(req.PrevLogIndex, req.PrevLogTerm) {
+	if !r.log.Exists(req.PrevLogIndex, req.PrevLogTerm) && req.PrevLogIndex != 0 {
 		return &raft.AppendEntriesResponse{
 			Term:    r.curTerm,
 			Success: false,

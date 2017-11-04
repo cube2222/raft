@@ -3,7 +3,6 @@ package raft
 import (
 	"github.com/cube2222/raft"
 	"github.com/pkg/errors"
-	"log"
 )
 
 type logEntry struct {
@@ -27,8 +26,6 @@ func (l *entryLog) Exists(index int64, term int64) bool {
 		return false
 	}
 	index = index - 1
-	log.Println(index)
-	log.Println(int64(len(l.log)))
 	if int64(len(l.log)) <= index {
 		return false
 	}
@@ -42,7 +39,6 @@ func (l *entryLog) Exists(index int64, term int64) bool {
 var ErrDoesNotExist = errors.Errorf("Entry does not exist")
 
 func (l *entryLog) Get(index int64) (*logEntry, error) {
-	log.Printf("***** Getting index: %v", index)
 	if index <= 0 {
 		return nil, ErrDoesNotExist
 	}
@@ -65,7 +61,7 @@ func (l *entryLog) DeleteFrom(index int64) {
 func (l *entryLog) Append(entry *raft.Entry, term int64) {
 	l.log = append(l.log, logEntry{
 		entry: *entry,
-		term: term,
+		term:  term,
 	})
 }
 
@@ -81,4 +77,3 @@ func (l *entryLog) GetLastEntry() *logEntry {
 
 	return &l.log[len(l.log)-1]
 }
-
