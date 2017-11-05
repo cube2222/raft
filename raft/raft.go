@@ -77,10 +77,17 @@ func (r *Raft) Run() {
 		}
 	}(r)
 
-	for range time.Tick(time.Millisecond * 50) {
-		if err := r.tick(); err != nil {
-			log.Printf("Error when ticking: %v", err)
-		}
+	for range time.Tick(time.Millisecond * 200) {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Println("**************************************************** I PAAAAAAANICKEEEEEED ************", r)
+				}
+			}()
+			if err := r.tick(); err != nil {
+				log.Printf("Error when ticking: %v", err)
+			}
+		}()
 	}
 }
 
@@ -152,10 +159,10 @@ func (r *Raft) startElection() {
 	votesChan := make(chan bool)
 
 	wg := sync.WaitGroup{}
-	wg.Add(r.clusterSize - 1)
 
 	for _, node := range r.cluster.Members() {
 		if node.Name != r.cluster.LocalMember().Name && node.Status == serf.StatusAlive {
+			wg.Add(1)
 			go r.askForVote(tdSnapshot.TermContext, tdSnapshot, fmt.Sprintf("%v:%v", node.Addr, 8001), votesChan)
 		}
 	}
@@ -242,15 +249,16 @@ func (r *Raft) initializeLeadership(ctx context.Context, term int64) {
 func (r *Raft) propagateMessages(ctx context.Context, tdSnapshot *TermDataSnapshot) {
 	ctx, _ = context.WithTimeout(ctx, time.Millisecond*60)
 	wg := sync.WaitGroup{}
-	wg.Add(r.cluster.NumNodes() - 1)
 	for _, node := range r.cluster.Members() {
 		if node.Name != r.cluster.LocalMember().Name && node.Status == serf.StatusAlive {
 			if r.leaderData.GetLastAppendEntries(node.Name).IsZero() {
+				wg.Add(1)
 				go func(node serf.Member) {
 					r.sendAppendEntries(ctx, tdSnapshot, node.Name, fmt.Sprintf("%v:%v", node.Addr, 8001), true)
 					wg.Done()
 				}(node)
 			} else if r.log.MaxIndex() >= r.leaderData.GetNextIndex(node.Name) || time.Since(r.leaderData.GetLastAppendEntries(node.Name)) < time.Millisecond*200 {
+				wg.Add(1)
 				go func(node serf.Member) {
 					r.sendAppendEntries(ctx, tdSnapshot, node.Name, fmt.Sprintf("%v:%v", node.Addr, 8001), false)
 					wg.Done()
@@ -311,8 +319,12 @@ func (r *Raft) sendAppendEntries(ctx context.Context, tdSnapshot *TermDataSnapsh
 	}
 
 	if res.Success {
-		r.leaderData.SetNextIndex(nodeID, nextIndex, nextIndex+1)
-		r.leaderData.NoteMatchIndex(nodeID, nextIndex)
+		if payload != nil {
+			r.leaderData.SetNextIndex(nodeID, nextIndex, nextIndex+1)
+			r.leaderData.NoteMatchIndex(nodeID, nextIndex)
+		} else {
+			r.leaderData.NoteMatchIndex(nodeID, prevIndex)
+		}
 	} else {
 		if nextIndex != 1 {
 			r.leaderData.SetNextIndex(nodeID, nextIndex, nextIndex-1)
@@ -369,13 +381,14 @@ func (r *Raft) AppendEntries(ctx context.Context, req *raft.AppendEntriesRequest
 	tdSnapshot := r.termData.GetSnapshot()
 
 	if req.Term < tdSnapshot.Term {
+		log.Printf("***** False because old term: %v current: %v.", req.Term, tdSnapshot.Term)
 		return &raft.AppendEntriesResponse{
 			Term:    tdSnapshot.Term,
 			Success: false,
 		}, nil
 	}
 
-	if req.Term < tdSnapshot.Term  {
+	if req.Term < tdSnapshot.Term {
 		log.Println("Becoming follower because of term override")
 		r.becomeFollower(tdSnapshot.Term, req.Term)
 	}
@@ -393,7 +406,7 @@ func (r *Raft) AppendEntries(ctx context.Context, req *raft.AppendEntriesRequest
 	r.resetElectionTimeout()
 
 	if !r.log.Exists(req.PrevLogIndex, req.PrevLogTerm) && req.PrevLogIndex != 0 {
-		fmt.Printf("***** False because prev log term doesn't exists.")
+		log.Printf("***** False because prev log term doesn't exists.")
 		return &raft.AppendEntriesResponse{
 			Term:    tdSnapshot.Term,
 			Success: false,
@@ -431,7 +444,6 @@ func (r *Raft) AppendEntries(ctx context.Context, req *raft.AppendEntriesRequest
 		}
 	}
 
-	fmt.Printf("***** Success append entries.")
 	return &raft.AppendEntriesResponse{
 		Term:    tdSnapshot.Term,
 		Success: true,
