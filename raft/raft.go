@@ -25,7 +25,6 @@ type Applyable interface {
 	Apply(entry *raft.Entry) error
 }
 
-// TODO: Zrób globalny term context.
 type Raft struct {
 	curRole     role
 	leaderID    string
@@ -34,6 +33,7 @@ type Raft struct {
 	applyable   Applyable
 
 	// On all servers, in theory persistent
+	// TODO: Też tylko monotonicznie rosnący
 	curTerm              int64
 	curTermContext       context.Context
 	curTermContextCancel context.CancelFunc
@@ -41,6 +41,7 @@ type Raft struct {
 	log                  *entryLog
 
 	// On all servers, volatile
+	// TODO: To też tylko monotonicznie rosnące
 	commitIndex int64
 	lastApplied int64
 
@@ -81,22 +82,21 @@ func NewRaft(applyable Applyable, name, advertiseAddress, clusterAddress string)
 		lastApplied: 0,
 
 		leaderData: NewLeaderData(0),
-
-		electionTimeout: time.Now().Add(time.Millisecond * time.Duration(1000+rand.Intn(2000))),
 	}
+	raftInstance.resetElectionTimeout()
 
 	return raftInstance, nil
 }
 
 func (r *Raft) Run() {
 	go func(raft *Raft) {
-		for range time.Tick(time.Second*3) {
-			log.Printf("***** %v is Leader with term %v", raft.leaderID, raft.curTerm)
+		for range time.Tick(time.Second * 3) {
+			log.Printf("***** Role: %v", raft.curRole)
 		}
 	}(r)
 
 	for range time.Tick(time.Millisecond * 50) {
-		if err := r.Tick(); err != nil {
+		if err := r.tick(); err != nil {
 			log.Printf("Error when ticking: %v", err)
 		}
 	}
@@ -126,7 +126,7 @@ func setupCluster(nodeName string, advertiseAddr string, clusterAddr string) (*s
 	return cluster, nil
 }
 
-func (r *Raft) Tick() error {
+func (r *Raft) tick() error {
 	if n := r.cluster.NumNodes(); n < r.clusterSize {
 		return errors.Errorf("Waiting for all nodes to join. Currently: %d Want: %d", n, r.clusterSize)
 	}
@@ -149,23 +149,24 @@ func (r *Raft) Tick() error {
 	switch r.curRole {
 	case Follower, Candidate:
 		if time.Now().After(r.electionTimeout) {
-			r.StartElection()
+			r.startElection()
 		}
 	case Leader:
-		r.PropagateMessages(ctx)
-		r.UpdateCommitIndex()
+		r.propagateMessages(ctx)
+		r.updateCommitIndex()
 	}
 
 	return nil
 }
 
-func (r *Raft) StartElection() {
+func (r *Raft) startElection() {
+	// TODO: Jeśli elekcja się udała, ale potem jest już kolejny term, to jak zostaniemy liderem to będzie split brain.
 	log.Println("*********** Starting election **************")
 	r.curTermContextCancel()
 
 	r.curTerm += 1
 	r.leaderID = ""
-	r.electionTimeout = time.Now().Add(time.Millisecond * time.Duration(1000+rand.Intn(2000)))
+	r.resetElectionTimeout()
 	ctx, cancel := context.WithCancel(context.Background())
 	r.curTermContext, r.curTermContextCancel = ctx, cancel
 	votes := 1
@@ -176,7 +177,7 @@ func (r *Raft) StartElection() {
 
 	for _, node := range r.cluster.Members() {
 		if node.Name != r.cluster.LocalMember().Name && node.Status == serf.StatusAlive {
-			go r.AskForVote(ctx, fmt.Sprintf("%v:%v", node.Addr, 8001), votesChan)
+			go r.askForVote(ctx, fmt.Sprintf("%v:%v", node.Addr, 8001), votesChan)
 		}
 	}
 
@@ -203,11 +204,11 @@ func (r *Raft) StartElection() {
 	}
 
 	if votes > r.clusterSize/2 {
-		r.InitializeLeadership(r.curTermContext)
+		r.initializeLeadership(r.curTermContext)
 	}
 }
 
-func (r *Raft) AskForVote(ctx context.Context, address string, voteChan chan<- bool) {
+func (r *Raft) askForVote(ctx context.Context, address string, voteChan chan<- bool) {
 	// TODO: Tu MUSI być cachowanie połączeń
 	conn, err := grpc.Dial(address, grpc.WithInsecure())
 	if err != nil {
@@ -237,13 +238,7 @@ func (r *Raft) AskForVote(ctx context.Context, address string, voteChan chan<- b
 
 	if r.curTerm < res.Term {
 		log.Println("Becoming follower because of term override")
-		r.electionTimeout = time.Now().Add(time.Millisecond * time.Duration(1000+rand.Intn(2000)))
-		voteChan <- false
-		r.curTermContextCancel()
-		r.curTermContext, r.curTermContextCancel = context.WithCancel(context.Background())
-		r.curTerm = res.Term
-		r.curRole = Follower
-		r.votedFor = ""
+		r.becomeFollower(res.Term)
 	}
 
 	voteChan <- res.VoteGranted
@@ -255,7 +250,7 @@ func drainChannel(ch <-chan bool, count int) {
 	}
 }
 
-func (r *Raft) InitializeLeadership(ctx context.Context) {
+func (r *Raft) initializeLeadership(ctx context.Context) {
 	log.Printf("*************** I'm becoming leader! Term: %v ******************", r.curTerm)
 	r.curRole = Leader
 	r.leaderID = r.cluster.LocalMember().Name
@@ -263,19 +258,20 @@ func (r *Raft) InitializeLeadership(ctx context.Context) {
 	r.leaderData = NewLeaderData(r.log.MaxIndex())
 }
 
-func (r *Raft) PropagateMessages(ctx context.Context) {
+func (r *Raft) propagateMessages(ctx context.Context) {
+	ctx, _ = context.WithTimeout(ctx, time.Millisecond*60)
 	wg := sync.WaitGroup{}
 	wg.Add(r.cluster.NumNodes() - 1)
 	for _, node := range r.cluster.Members() {
 		if node.Name != r.cluster.LocalMember().Name && node.Status == serf.StatusAlive {
 			if r.leaderData.GetLastAppendEntries(node.Name).IsZero() {
 				go func(node serf.Member) {
-					r.SendAppendEntries(ctx, node.Name, fmt.Sprintf("%v:%v", node.Addr, 8001), true)
+					r.sendAppendEntries(ctx, node.Name, fmt.Sprintf("%v:%v", node.Addr, 8001), true)
 					wg.Done()
 				}(node)
 			} else if r.log.MaxIndex() >= r.leaderData.GetNextIndex(node.Name) || time.Since(r.leaderData.GetLastAppendEntries(node.Name)) < time.Millisecond*200 {
 				go func(node serf.Member) {
-					r.SendAppendEntries(ctx, node.Name, fmt.Sprintf("%v:%v", node.Addr, 8001), false)
+					r.sendAppendEntries(ctx, node.Name, fmt.Sprintf("%v:%v", node.Addr, 8001), false)
 					wg.Done()
 				}(node)
 			}
@@ -284,7 +280,7 @@ func (r *Raft) PropagateMessages(ctx context.Context) {
 	wg.Wait()
 }
 
-func (r *Raft) SendAppendEntries(ctx context.Context, nodeID string, address string, empty bool) {
+func (r *Raft) sendAppendEntries(ctx context.Context, nodeID string, address string, empty bool) {
 	conn, err := grpc.Dial(address, grpc.WithInsecure())
 	if err != nil {
 		log.Printf("Error when dialing to send append entries: %v", err)
@@ -321,41 +317,36 @@ func (r *Raft) SendAppendEntries(ctx context.Context, nodeID string, address str
 		LeaderCommit: r.commitIndex,
 	})
 	if err != nil {
-		log.Printf("Couldn't send append entries: %v", err)
+		log.Printf("Couldn't send append entries to %v: %v", nodeID, err)
 		return
 	}
 
 	r.leaderData.NoteAppendEntries(nodeID)
 
-	if res.Term < r.curTerm {
-		if r.curTerm < res.Term {
-			log.Println("Becoming follower because of term override")
-			r.electionTimeout = time.Now().Add(time.Millisecond * time.Duration(1000+rand.Intn(2000)))
-			r.curTermContextCancel()
-			r.curTermContext, r.curTermContextCancel = context.WithCancel(context.Background())
-			r.curTerm = res.Term
-			r.curRole = Follower
-			r.votedFor = ""
-		}
+	if r.curTerm < res.Term {
+		log.Println("Becoming follower because of term override")
+		r.becomeFollower(res.Term)
 		return
 	}
 
 	if res.Success {
-		r.leaderData.SetNextIndex(nodeID, nextIndex, nextIndex + 1)
+		r.leaderData.SetNextIndex(nodeID, nextIndex, nextIndex+1)
 		r.leaderData.NoteMatchIndex(nodeID, nextIndex)
 	} else {
 		if nextIndex != 1 {
-			r.leaderData.SetNextIndex(nodeID, nextIndex, nextIndex - 1)
+			r.leaderData.SetNextIndex(nodeID, nextIndex, nextIndex-1)
 		}
 	}
 }
 
-func (r *Raft) UpdateCommitIndex() {
+func (r *Raft) updateCommitIndex() {
 	if r.log.MaxIndex() == r.commitIndex {
+		log.Println("****** Log index equal to max index.")
 		return
 	}
 
 	for candidate := r.log.MaxIndex(); candidate > r.commitIndex; candidate-- {
+		log.Printf("****** Trying candidate: %v", candidate)
 
 		if entry, err := r.log.Get(candidate); err != nil {
 			return
@@ -370,14 +361,30 @@ func (r *Raft) UpdateCommitIndex() {
 			if node.Name != r.cluster.LocalMember().Name {
 				if r.leaderData.GetMatchIndex(node.Name) >= candidate {
 					oks += 1
+				} else {
+					log.Printf("****** Node %v match index is too low: %v", node.Name, r.leaderData.GetMatchIndex(node.Name))
 				}
 			}
 		}
 		if oks >= r.clusterSize/2 {
+			log.Printf("****** Success with candidate: %v", candidate)
 			r.commitIndex = candidate
 			break
 		}
 	}
+}
+
+func (r *Raft) becomeFollower(term int64) {
+	r.curTermContextCancel()
+	r.curTermContext, r.curTermContextCancel = context.WithCancel(context.Background())
+	r.resetElectionTimeout()
+	r.curTerm = term
+	r.curRole = Follower
+	r.votedFor = ""
+}
+
+func (r *Raft) resetElectionTimeout() {
+	r.electionTimeout = time.Now().Add(time.Millisecond * time.Duration(3000+rand.Intn(2000)))
 }
 
 func (r *Raft) AppendEntries(ctx context.Context, req *raft.AppendEntriesRequest) (*raft.AppendEntriesResponse, error) {
@@ -390,11 +397,7 @@ func (r *Raft) AppendEntries(ctx context.Context, req *raft.AppendEntriesRequest
 
 	if r.curTerm < req.Term {
 		log.Println("Becoming follower because of term override")
-		r.curTermContextCancel()
-		r.curTermContext, r.curTermContextCancel = context.WithCancel(context.Background())
-		r.curTerm = req.Term
-		r.curRole = Follower
-		r.votedFor = ""
+		r.becomeFollower(req.Term)
 	}
 	if r.curRole == Candidate {
 		r.curRole = Follower
@@ -406,9 +409,10 @@ func (r *Raft) AppendEntries(ctx context.Context, req *raft.AppendEntriesRequest
 	}
 
 	r.leaderID = req.LeaderID
-	r.electionTimeout = time.Now().Add(time.Millisecond * time.Duration(1000+rand.Intn(2000)))
+	r.resetElectionTimeout()
 
 	if !r.log.Exists(req.PrevLogIndex, req.PrevLogTerm) && req.PrevLogIndex != 0 {
+		fmt.Printf("***** False because prev log term doesn't exists.")
 		return &raft.AppendEntriesResponse{
 			Term:    r.curTerm,
 			Success: false,
@@ -431,18 +435,22 @@ func (r *Raft) AppendEntries(ctx context.Context, req *raft.AppendEntriesRequest
 
 		if shouldInsert {
 			r.log.Append(req.Entry, req.Term)
+			log.Println("*************** Added new entry to my log")
 		}
 	}
 
 	if req.LeaderCommit > r.commitIndex {
 		maxEntryIndex := r.log.MaxIndex()
 		if maxEntryIndex < req.LeaderCommit {
+			log.Printf("****** Setting commit index: %v", maxEntryIndex)
 			r.commitIndex = maxEntryIndex
 		} else {
+			log.Printf("****** Setting commit index: %v", req.LeaderCommit)
 			r.commitIndex = req.LeaderCommit
 		}
 	}
 
+	fmt.Printf("***** Success append entries.")
 	return &raft.AppendEntriesResponse{
 		Term:    r.curTerm,
 		Success: true,
@@ -498,18 +506,26 @@ func (r *Raft) RequestVote(ctx context.Context, req *raft.RequestVoteRequest) (*
 func (r *Raft) NewEntry(ctx context.Context, entry *raft.Entry) (*raft.EntryResponse, error) {
 	if r.curRole != Leader {
 		for _, node := range r.cluster.Members() {
-			log.Printf("Redirecting new entry to leader: %v", r.leaderID)
-			conn, err := grpc.Dial(fmt.Sprintf("%v:%v", node.Addr, 8001), grpc.WithInsecure())
-			if err != nil {
-				log.Printf("Error when dialing to send append entries: %v", err)
-				return nil, err
+			if node.Name == r.leaderID {
+				log.Printf("Redirecting new entry to leader: %v", r.leaderID)
+				conn, err := grpc.Dial(fmt.Sprintf("%v:%v", node.Addr, 8001), grpc.WithInsecure())
+				if err != nil {
+					log.Printf("Error when dialing to send append entries: %v", err)
+					return nil, err
+				}
+				defer conn.Close()
+
+				cli := raft.NewRaftClient(conn)
+
+				return cli.NewEntry(ctx, entry)
 			}
-			defer conn.Close()
-
-			cli := raft.NewRaftClient(conn)
-
-			return cli.NewEntry(ctx, entry)
 		}
+
+		return nil, errors.Errorf("Couldn't find leader")
 	}
-	return nil, errors.Errorf("Couldn't find leader")
+
+	log.Println("****** Adding new entry to log as leader.")
+	r.log.Append(entry, r.curTerm)
+
+	return &raft.EntryResponse{}, nil
 }

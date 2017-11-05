@@ -7,14 +7,17 @@ import (
 	"os"
 	"net"
 	"google.golang.org/grpc"
+	"net/http"
+	"io/ioutil"
+	"fmt"
 )
 
 type MyApplyable struct {
 }
 
 func (*MyApplyable) Apply(entry *raft2.Entry) error {
-	log.Printf("Applying: %s", entry.Data)
-	panic("implement me")
+	log.Printf("******************* Applying: %s", entry.Data)
+	return nil
 }
 
 func main() {
@@ -43,6 +46,22 @@ func main() {
 	raft2.RegisterRaftServer(s, myRaft)
 
 	go myRaft.Run()
+
+	go http.ListenAndServe(":8002", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			fmt.Fprint(w, err)
+			return
+		}
+		_, err = myRaft.NewEntry(r.Context(), &raft2.Entry{
+			Data: data,
+		})
+		if err != nil {
+			fmt.Fprint(w, err)
+			return
+		}
+		fmt.Fprint(w, "Success")
+	}))
 
 	if err := s.Serve(lis); err != nil {
 		log.Fatal(err)
