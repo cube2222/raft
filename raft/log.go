@@ -5,19 +5,14 @@ import (
 	"github.com/pkg/errors"
 )
 
-type logEntry struct {
-	entry raft.Entry
-	term  int64
-}
-
 // TODO: Mutexes :)
 type entryLog struct {
-	log []logEntry
+	log []raft.Entry
 }
 
 func NewEntryLog() *entryLog {
 	return &entryLog{
-		log: make([]logEntry, 0),
+		log: make([]raft.Entry, 0),
 	}
 }
 
@@ -29,7 +24,7 @@ func (l *entryLog) Exists(index int64, term int64) bool {
 	if int64(len(l.log)) <= index {
 		return false
 	}
-	if l.log[index].term != term {
+	if l.log[index].Term != term {
 		return false
 	}
 
@@ -38,7 +33,7 @@ func (l *entryLog) Exists(index int64, term int64) bool {
 
 var ErrDoesNotExist = errors.Errorf("Entry does not exist")
 
-func (l *entryLog) Get(index int64) (*logEntry, error) {
+func (l *entryLog) Get(index int64) (*raft.Entry, error) {
 	if index <= 0 {
 		return nil, ErrDoesNotExist
 	}
@@ -59,10 +54,7 @@ func (l *entryLog) DeleteFrom(index int64) {
 }
 
 func (l *entryLog) Append(entry *raft.Entry, term int64) {
-	l.log = append(l.log, logEntry{
-		entry: *entry,
-		term:  term,
-	})
+	l.log = append(l.log, *entry)
 }
 
 func (l *entryLog) MaxIndex() int64 {
@@ -70,7 +62,7 @@ func (l *entryLog) MaxIndex() int64 {
 	return int64(len(l.log))
 }
 
-func (l *entryLog) GetLastEntry() *logEntry {
+func (l *entryLog) GetLastEntry() *raft.Entry {
 	if len(l.log) == 0 {
 		return nil
 	}

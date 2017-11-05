@@ -128,7 +128,7 @@ func (r *Raft) tick() error {
 			}
 			return errors.Wrap(err, "Couldn't get next entry to be applied")
 		}
-		if err := r.applyable.Apply(&nextEntry.entry); err != nil {
+		if err := r.applyable.Apply(nextEntry); err != nil {
 			return errors.Wrap(err, "Error when applying entry")
 		}
 		r.lastApplied += 1
@@ -207,7 +207,7 @@ func (r *Raft) askForVote(ctx context.Context, tdSnapshot *TermDataSnapshot, add
 
 	var lastIndexTerm int64 = 0
 	if maxEntry := r.log.GetLastEntry(); maxEntry != nil {
-		lastIndexTerm = maxEntry.term
+		lastIndexTerm = maxEntry.Term
 	}
 
 	res, err := cli.RequestVote(ctx, &raft.RequestVoteRequest{
@@ -284,7 +284,7 @@ func (r *Raft) sendAppendEntries(ctx context.Context, tdSnapshot *TermDataSnapsh
 	var prevTerm int64 = 0
 	entry, _ := r.log.Get(prevIndex)
 	if entry != nil {
-		prevTerm = entry.term
+		prevTerm = entry.Term
 	}
 
 	var payload *raft.Entry
@@ -293,7 +293,7 @@ func (r *Raft) sendAppendEntries(ctx context.Context, tdSnapshot *TermDataSnapsh
 			// If this errors than payload ends up being nil, that's ok.
 			entry, _ = r.log.Get(nextIndex)
 			if entry != nil {
-				payload = &entry.entry
+				payload = entry
 			}
 		}
 	}
@@ -344,7 +344,7 @@ func (r *Raft) updateCommitIndex() {
 		if entry, err := r.log.Get(candidate); err != nil {
 			return
 		} else {
-			if entry.term != r.termData.GetTerm() {
+			if entry.Term != r.termData.GetTerm() {
 				return
 			}
 		}
@@ -359,7 +359,7 @@ func (r *Raft) updateCommitIndex() {
 				}
 			}
 		}
-		if oks >= r.clusterSize/2 {
+		if oks > r.clusterSize/2 {
 			log.Printf("****** Success with candidate: %v", candidate)
 			// TODO: To też musi lecieć w term data, żeby zadbać o to, żeby nie doszło do update'a jeżeli już nie jesteśmy liderem
 			r.commitIndex = candidate
@@ -406,7 +406,7 @@ func (r *Raft) AppendEntries(ctx context.Context, req *raft.AppendEntriesRequest
 	r.resetElectionTimeout()
 
 	if !r.log.Exists(req.PrevLogIndex, req.PrevLogTerm) && req.PrevLogIndex != 0 {
-		log.Printf("***** False because prev log term doesn't exists.")
+		log.Printf("***** False because prev log term doesn't exists. Previous log term: %v Actual max: %v", req.PrevLogIndex, r.log.MaxIndex())
 		return &raft.AppendEntriesResponse{
 			Term:    tdSnapshot.Term,
 			Success: false,
@@ -420,7 +420,7 @@ func (r *Raft) AppendEntries(ctx context.Context, req *raft.AppendEntriesRequest
 
 		entry, err := r.log.Get(curLogIndex)
 		if err == nil {
-			if entry.term != req.Term {
+			if entry.Term != req.Term {
 				r.log.DeleteFrom(curLogIndex)
 			} else {
 				shouldInsert = false
@@ -470,7 +470,7 @@ func (r *Raft) RequestVote(ctx context.Context, req *raft.RequestVoteRequest) (*
 
 	if lastEntry != nil {
 		curLastLogIndex = lastIndex
-		curLastLogTerm = lastEntry.term
+		curLastLogTerm = lastEntry.Term
 	} else {
 		curLastLogIndex = 0
 		curLastLogTerm = 0
@@ -517,6 +517,7 @@ func (r *Raft) NewEntry(ctx context.Context, entry *raft.Entry) (*raft.EntryResp
 
 		return nil, errors.Errorf("Couldn't find leader")
 	}
+	entry.Term = tdSnapshot.Term
 
 	log.Println("****** Adding new entry to log as leader.")
 	r.log.Append(entry, tdSnapshot.Term)
