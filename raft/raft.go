@@ -12,8 +12,6 @@ import (
 	"fmt"
 	"google.golang.org/grpc"
 	"github.com/satori/go.uuid"
-	"net"
-	"strings"
 )
 
 type Applyable interface {
@@ -44,7 +42,7 @@ type Raft struct {
 	electionTimeout time.Time
 }
 
-func NewRaft(applyable Applyable, name, clusterAddress string, opts... func(*Raft)) (*Raft, error) {
+func NewRaft(applyable Applyable, name, clusterAddress string, opts ... func(*Raft)) (*Raft, error) {
 	cluster, err := setupCluster(
 		name,
 		clusterAddress,
@@ -107,16 +105,10 @@ func (r *Raft) Close() {
 }
 
 func setupCluster(nodeName string, clusterAddr string) (*serf.Serf, error) {
-	advertiseAddr, err := GetAdvertiseAddress()
-	if err != nil {
-		return nil, errors.Wrap(err, "Couldn't get advertise address")
-	}
-
 	conf := serf.DefaultConfig()
 	conf.Init()
 
 	conf.MemberlistConfig.Name = nodeName
-	conf.MemberlistConfig.AdvertiseAddr = advertiseAddr
 
 	cluster, err := serf.Create(conf)
 	if err != nil {
@@ -129,25 +121,6 @@ func setupCluster(nodeName string, clusterAddr string) (*serf.Serf, error) {
 	}
 
 	return cluster, nil
-}
-
-func GetAdvertiseAddress() (string, error) {
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return "", errors.Wrap(err, "Couldn't read network interfaces to find potential advertise address")
-	}
-	for _, iface := range ifaces {
-		if iface.Name == "eth0" {
-			addrs, err := iface.Addrs()
-			if err != nil {
-				return "", errors.Wrap(err, "Couldn't read addresses of eth0 interface to find potential advertise address")
-			}
-			actual := strings.Split(addrs[0].String(), "/")[0]
-			fmt.Printf("Using %v\n", actual)
-			return actual, nil
-		}
-	}
-	return "", errors.New("No network interfaces found")
 }
 
 func (r *Raft) tick() error {
@@ -571,7 +544,7 @@ func (r *Raft) NewEntry(ctx context.Context, entry *raft.Entry) (*raft.EntryResp
 				return nil, errors.Errorf("Operation overriden. New ID: %v", finalEntry.ID)
 			}
 		}
-		time.Sleep(time.Millisecond*5)
+		time.Sleep(time.Millisecond * 5)
 	}
 
 	return &raft.EntryResponse{}, nil
