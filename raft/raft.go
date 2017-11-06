@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"google.golang.org/grpc"
 	"github.com/satori/go.uuid"
+	"net"
+	"strings"
 )
 
 type Applyable interface {
@@ -42,14 +44,12 @@ type Raft struct {
 	electionTimeout time.Time
 }
 
-func NewRaft(applyable Applyable, name, advertiseAddress, clusterAddress string) (*Raft, error) {
+func NewRaft(applyable Applyable, name, clusterAddress string, opts... func(*Raft)) (*Raft, error) {
 	cluster, err := setupCluster(
 		name,
-		advertiseAddress,
 		clusterAddress,
 	)
 	if err != nil {
-		log.Printf("Name: %v, AdvertiseAddress: %v, ClusterAddress: %v", name, advertiseAddress, clusterAddress)
 		return nil, errors.Wrap(err, "Couldn't setup cluster.")
 	}
 
@@ -68,7 +68,17 @@ func NewRaft(applyable Applyable, name, advertiseAddress, clusterAddress string)
 	}
 	raftInstance.resetElectionTimeout()
 
+	for _, opt := range opts {
+		opt(raftInstance)
+	}
+
 	return raftInstance, nil
+}
+
+func WithBootstrapClusterSize(n int) func(r *Raft) {
+	return func(r *Raft) {
+		r.clusterSize = n
+	}
 }
 
 func (r *Raft) Run() {
@@ -96,7 +106,12 @@ func (r *Raft) Close() {
 	r.cluster.Leave()
 }
 
-func setupCluster(nodeName string, advertiseAddr string, clusterAddr string) (*serf.Serf, error) {
+func setupCluster(nodeName string, clusterAddr string) (*serf.Serf, error) {
+	advertiseAddr, err := GetAdvertiseAddress()
+	if err != nil {
+		return nil, errors.Wrap(err, "Couldn't get advertise address")
+	}
+
 	conf := serf.DefaultConfig()
 	conf.Init()
 
@@ -114,6 +129,25 @@ func setupCluster(nodeName string, advertiseAddr string, clusterAddr string) (*s
 	}
 
 	return cluster, nil
+}
+
+func GetAdvertiseAddress() (string, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "", errors.Wrap(err, "Couldn't read network interfaces to find potential advertise address")
+	}
+	for _, iface := range ifaces {
+		if iface.Name == "eth0" {
+			addrs, err := iface.Addrs()
+			if err != nil {
+				return "", errors.Wrap(err, "Couldn't read addresses of eth0 interface to find potential advertise address")
+			}
+			actual := strings.Split(addrs[0].String(), "/")[0]
+			fmt.Printf("Using %v\n", actual)
+			return actual, nil
+		}
+	}
+	return "", errors.New("No network interfaces found")
 }
 
 func (r *Raft) tick() error {

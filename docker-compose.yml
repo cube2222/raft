@@ -1,0 +1,30 @@
+version: '3'
+services:
+  node-1:
+    image: raft
+    ports:
+      - 3000:8002
+    networks:
+      - cluster
+    environment:
+      RAFT_ADVERTISEADDRESS: "node-1"
+  node-2:
+    image: raft
+    ports:
+      - 3001:8002
+    networks:
+      - cluster
+    environment:
+      RAFT_ADVERTISEADDRESS: "node-2"
+      RAFT_CLUSTERADDRESS: "node-1"
+  node-3:
+    image: raft
+    ports:
+      - 3002:8002
+    networks:
+      - cluster
+    environment:
+      RAFT_ADVERTISEADDRESS: "node-3"
+      RAFT_CLUSTERADDRESS: "node-2"
+networks:
+  cluster:

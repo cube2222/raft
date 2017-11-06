@@ -43,17 +43,14 @@ func main() {
 		make(map[string]interface{}),
 	}
 
-	clusterAddress := ""
-	if len(os.Args) == 3 {
-		clusterAddress = os.Args[2]
-	}
+	config := LoadConfig()
 
 	hostname, err := os.Hostname()
 	if err != nil {
 		log.Fatal("Couldn't get hostname")
 	}
 
-	myRaft, err := raft.NewRaft(myApplyable, hostname, os.Args[1], clusterAddress)
+	myRaft, err := raft.NewRaft(myApplyable, hostname, config.ClusterAddress)
 	if err != nil {
 		log.Fatal(err)
 	}
