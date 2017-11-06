@@ -8,8 +8,9 @@ service Raft {
 }
 
 message Entry {
-    bytes data = 1;
-    int64 term = 2;
+    string ID = 1;
+    bytes data = 2;
+    int64 term = 3;
 }
 
 message AppendEntriesRequest {

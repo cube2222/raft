@@ -10,18 +10,38 @@ import (
 	"net/http"
 	"io/ioutil"
 	"fmt"
+	"encoding/json"
+	"bytes"
+	"github.com/pkg/errors"
+	"github.com/gorilla/mux"
 )
 
-type MyApplyable struct {
+type AddObject struct {
+	ID     string      `json:"id"`
+	Object interface{} `json:"object"`
 }
 
-func (*MyApplyable) Apply(entry *raft2.Entry) error {
+type MyApplyable struct {
+	Storage map[string]interface{}
+}
+
+func (ma *MyApplyable) Apply(entry *raft2.Entry) error {
 	log.Printf("******************* Applying: %s", entry.Data)
+	var operation AddObject
+	err := json.NewDecoder(bytes.NewReader(entry.Data)).Decode(&operation)
+	if err != nil {
+		return errors.Wrap(err, "Couldn't decode object")
+	}
+
+	ma.Storage[operation.ID] = operation.Object
+
 	return nil
 }
 
 func main() {
-	myApplyable := &MyApplyable{}
+	myApplyable := &MyApplyable{
+		make(map[string]interface{}),
+	}
 
 	clusterAddress := ""
 	if len(os.Args) == 3 {
@@ -47,7 +67,8 @@ func main() {
 
 	go myRaft.Run()
 
-	go http.ListenAndServe(":8002", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	m := mux.NewRouter()
+	m.HandleFunc("/command", func(w http.ResponseWriter, r *http.Request) {
 		data, err := ioutil.ReadAll(r.Body)
 		if err != nil {
 			fmt.Fprint(w, err)
@@ -61,7 +82,25 @@ func main() {
 			return
 		}
 		fmt.Fprint(w, "Success")
-	}))
+	})
+	m.HandleFunc("/debug", func(w http.ResponseWriter, r *http.Request) {
+		entries := myRaft.GetDebugData()
+		for _, entry := range entries {
+			fmt.Fprintf(w, "ID: %s\n Term: %v\n Data:\n%s\n", entry.ID, entry.Term, entry.Data)
+		}
+	})
+	m.HandleFunc("/{id}", func(w http.ResponseWriter, r *http.Request) {
+		obj := myApplyable.Storage[mux.Vars(r)["id"]]
+		if obj == nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(&obj); err != nil {
+			fmt.Fprint(w, "Error when encoding object: %v", err)
+		}
+	})
+
+	go http.ListenAndServe(":8002", m)
 
 	if err := s.Serve(lis); err != nil {
 		log.Fatal(err)

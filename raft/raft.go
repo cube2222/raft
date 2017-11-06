@@ -11,6 +11,7 @@ import (
 	"sync"
 	"fmt"
 	"google.golang.org/grpc"
+	"github.com/satori/go.uuid"
 )
 
 type Applyable interface {
@@ -77,7 +78,7 @@ func (r *Raft) Run() {
 		}
 	}(r)
 
-	for range time.Tick(time.Millisecond * 200) {
+	for range time.Tick(time.Millisecond * 25) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -334,7 +335,6 @@ func (r *Raft) sendAppendEntries(ctx context.Context, tdSnapshot *TermDataSnapsh
 
 func (r *Raft) updateCommitIndex() {
 	if r.log.MaxIndex() == r.commitIndex {
-		log.Println("****** Log index equal to max index.")
 		return
 	}
 
@@ -497,6 +497,9 @@ func (r *Raft) RequestVote(ctx context.Context, req *raft.RequestVoteRequest) (*
 }
 
 func (r *Raft) NewEntry(ctx context.Context, entry *raft.Entry) (*raft.EntryResponse, error) {
+	if entry.ID == "" {
+		entry.ID = uuid.NewV4().String()
+	}
 	tdSnapshot := r.termData.GetSnapshot()
 	if tdSnapshot.Role != Leader {
 		for _, node := range r.cluster.Members() {
@@ -520,7 +523,26 @@ func (r *Raft) NewEntry(ctx context.Context, entry *raft.Entry) (*raft.EntryResp
 	entry.Term = tdSnapshot.Term
 
 	log.Println("****** Adding new entry to log as leader.")
-	r.log.Append(entry, tdSnapshot.Term)
+	entryIndex := r.log.Append(entry, tdSnapshot.Term)
+
+	for {
+		if r.commitIndex >= entryIndex {
+			finalEntry, err := r.log.Get(entryIndex)
+			if err != nil {
+				return nil, errors.Wrap(err, "Inexistant entry commited")
+			}
+			if finalEntry.ID == entry.ID {
+				return &raft.EntryResponse{}, nil
+			} else {
+				return nil, errors.Errorf("Operation overriden. New ID: %v", finalEntry.ID)
+			}
+		}
+		time.Sleep(time.Millisecond*5)
+	}
 
 	return &raft.EntryResponse{}, nil
+}
+
+func (r *Raft) GetDebugData() []raft.Entry {
+	return r.log.log
 }

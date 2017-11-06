@@ -53,8 +53,10 @@ func (l *entryLog) DeleteFrom(index int64) {
 	l.log = l.log[:index]
 }
 
-func (l *entryLog) Append(entry *raft.Entry, term int64) {
+func (l *entryLog) Append(entry *raft.Entry, term int64) int64 {
 	l.log = append(l.log, *entry)
+	// Keep in mind, indexes are from 1.
+	return int64(len(l.log))
 }
 
 func (l *entryLog) MaxIndex() int64 {
