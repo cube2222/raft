@@ -1,17 +1,19 @@
 package raft
 
 import (
-	"github.com/cube2222/raft"
-	"golang.org/x/net/context"
+	"fmt"
 	"log"
-	"time"
 	"math/rand"
+	"sync"
+	"time"
+
+	"github.com/cube2222/raft"
 	"github.com/hashicorp/serf/serf"
 	"github.com/pkg/errors"
-	"sync"
-	"fmt"
-	"google.golang.org/grpc"
 	"github.com/satori/go.uuid"
+	"github.com/uber-go/atomic"
+	"golang.org/x/net/context"
+	"google.golang.org/grpc"
 )
 
 type Applyable interface {
@@ -23,18 +25,17 @@ type Raft struct {
 	clusterSize int
 	applyable   Applyable
 
-	// On all servers, in theory persistent
+	// On all servers, persistent
 	// Term specific
 	termData *termData
 
 	log *entryLog
 
 	// On all servers, volatile
-	// TODO: To też tylko monotonicznie rosnące
-	commitIndex int64
+	commitIndex *atomic.Int64
 	lastApplied int64
 
-	// On leader, reinitialized after collection
+	// On leader, reinitialized after election
 	leaderData *leaderData
 
 	// On non-leader
@@ -58,7 +59,7 @@ func NewRaft(applyable Applyable, name, clusterAddress string, opts ... func(*Ra
 		termData: NewTermData(cluster.LocalMember().Name),
 		log:      NewEntryLog(),
 
-		commitIndex: 0,
+		commitIndex: atomic.NewInt64(0),
 		lastApplied: 0,
 
 		leaderData: NewLeaderData(0),
@@ -127,7 +128,9 @@ func (r *Raft) tick() error {
 		return errors.Errorf("Waiting for all nodes to join. Currently: %d Want: %d", n, r.clusterSize)
 	}
 
-	for r.commitIndex > r.lastApplied {
+	commitIndex := r.commitIndex.Load()
+
+	for commitIndex > r.lastApplied {
 		nextEntry, err := r.log.Get(r.lastApplied + 1)
 		if err != nil {
 			if err == ErrDoesNotExist {
@@ -309,7 +312,7 @@ func (r *Raft) sendAppendEntries(ctx context.Context, tdSnapshot *TermDataSnapsh
 		PrevLogIndex: prevIndex,
 		PrevLogTerm:  prevTerm,
 		Entry:        payload,
-		LeaderCommit: r.commitIndex,
+		LeaderCommit: r.commitIndex.Load(),
 	})
 	if err != nil {
 		log.Printf("Couldn't send append entries to %v: %v", nodeID, err)
@@ -339,11 +342,12 @@ func (r *Raft) sendAppendEntries(ctx context.Context, tdSnapshot *TermDataSnapsh
 }
 
 func (r *Raft) updateCommitIndex() {
-	if r.log.MaxIndex() == r.commitIndex {
+	commitIndex := r.commitIndex.Load()
+	if r.log.MaxIndex() == commitIndex {
 		return
 	}
 
-	for candidate := r.log.MaxIndex(); candidate > r.commitIndex; candidate-- {
+	for candidate := r.log.MaxIndex(); candidate > commitIndex; candidate-- {
 		log.Printf("****** Trying candidate: %v", candidate)
 
 		if entry, err := r.log.Get(candidate); err != nil {
@@ -366,8 +370,10 @@ func (r *Raft) updateCommitIndex() {
 		}
 		if oks > r.clusterSize/2 {
 			log.Printf("****** Success with candidate: %v", candidate)
-			// TODO: To też musi lecieć w term data, żeby zadbać o to, żeby nie doszło do update'a jeżeli już nie jesteśmy liderem
-			r.commitIndex = candidate
+			// We do Atomic Compare and Set so that it only gets updated if it haven't changed since we read it.
+			// This may be important in case something got overriden for some reason and bumped up.
+			// Because that could potentially break the monotonicity of the commit index.
+			r.commitIndex.CAS(commitIndex, candidate)
 			break
 		}
 	}
@@ -438,14 +444,15 @@ func (r *Raft) AppendEntries(ctx context.Context, req *raft.AppendEntriesRequest
 		}
 	}
 
-	if req.LeaderCommit > r.commitIndex {
+	commitIndex := r.commitIndex.Load()
+	if req.LeaderCommit > commitIndex {
 		maxEntryIndex := r.log.MaxIndex()
 		if maxEntryIndex < req.LeaderCommit {
 			log.Printf("****** Setting commit index: %v", maxEntryIndex)
-			r.commitIndex = maxEntryIndex
+			r.commitIndex.CAS(commitIndex, maxEntryIndex)
 		} else {
 			log.Printf("****** Setting commit index: %v", req.LeaderCommit)
-			r.commitIndex = req.LeaderCommit
+			r.commitIndex.CAS(commitIndex, req.LeaderCommit)
 		}
 	}
 
@@ -531,7 +538,7 @@ func (r *Raft) NewEntry(ctx context.Context, entry *raft.Entry) (*raft.EntryResp
 	entryIndex := r.log.Append(entry, tdSnapshot.Term)
 
 	for {
-		if r.commitIndex >= entryIndex {
+		if r.commitIndex.Load() >= entryIndex {
 			finalEntry, err := r.log.Get(entryIndex)
 			if err != nil {
 				return nil, errors.Wrap(err, "Inexistant entry commited")
