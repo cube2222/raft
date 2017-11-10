@@ -2,10 +2,11 @@ package raft
 
 import (
 	"context"
-	"sync"
-	"os"
-	"log"
 	"encoding/json"
+	"os"
+	"sync"
+
+	"github.com/pkg/errors"
 )
 
 type role int
@@ -29,18 +30,21 @@ type termData struct {
 	mutex sync.RWMutex
 }
 
-func NewTermData(nodeID string) *termData {
-	snapshot := loadSnapshot()
+func NewTermData(nodeID string) (*termData, error) {
+	snapshot, err := loadSnapshot()
+	if err != nil {
+		return nil, errors.Wrap(err, "Couldn't load snapshot")
+	}
 
 	td := termData{
-		nodeID: nodeID,
-		role:   Follower,
-		term:   snapshot.Term,
+		nodeID:   nodeID,
+		role:     Follower,
+		term:     snapshot.Term,
 		votedFor: snapshot.VotedFor,
 	}
 	td.termContext, td.termContextCancel = context.WithCancel(context.Background())
 
-	return &td
+	return &td, nil
 }
 
 func (td *termData) OverrideTerm(prevTerm, term int64) bool {
@@ -65,7 +69,7 @@ func (td *termData) OverrideTerm(prevTerm, term int64) bool {
 	return true
 }
 
-func (td *termData) InitiateElection() (*TermDataSnapshot) {
+func (td *termData) InitiateElection() (*TermDataSnapshot, error) {
 	td.mutex.Lock()
 	defer td.mutex.Unlock()
 
@@ -79,9 +83,11 @@ func (td *termData) InitiateElection() (*TermDataSnapshot) {
 	td.termContext, td.termContextCancel = context.WithCancel(context.Background())
 
 	snapshot := td.getSnapshotInternal()
-	snapshot.persist()
+	if err := snapshot.persist(); err != nil {
+		return nil, errors.Wrap(err, "Couldn't persist new term")
+	}
 
-	return snapshot
+	return snapshot, nil
 }
 
 func (td *termData) BecomeLeader(term int64) bool {
@@ -157,11 +163,11 @@ func (td *termData) SetVotedFor(term int64, nodeID string) bool {
 }
 
 type TermDataSnapshot struct {
-	Leader      string `json:"-"`
-	Role        role `json:"-"`
-	Term        int64 `json:"term"`
+	Leader      string          `json:"-"`
+	Role        role            `json:"-"`
+	Term        int64           `json:"term"`
 	TermContext context.Context `json:"-"`
-	VotedFor    string `json:"voted_for"`
+	VotedFor    string          `json:"voted_for"`
 }
 
 func (td *termData) getSnapshotInternal() *TermDataSnapshot {
@@ -181,27 +187,30 @@ func (td *termData) GetSnapshot() *TermDataSnapshot {
 	return td.getSnapshotInternal()
 }
 
-func (td *TermDataSnapshot) persist() {
+func (td *TermDataSnapshot) persist() error {
 	file, err := os.Create("termdata.json")
 	if err != nil {
-		// TODO: Proper error handling
-		log.Fatalf("Why doesn't file io work :( ? %v", err)
+		return errors.Wrap(err, "Couldn't create file to persist term data")
 	}
 	defer file.Close()
-	json.NewEncoder(file).Encode(td)
+	if err = json.NewEncoder(file).Encode(td); err != nil {
+		return errors.Wrap(err, "Couldn't encode term data to persistent storage")
+	}
+	return nil
 }
 
-func loadSnapshot() *TermDataSnapshot {
-	// TODO: Do fstat, then potentially open with error checking
-	file, _ := os.Open("termdata.json")
-	defer file.Close()
+func loadSnapshot() (*TermDataSnapshot, error) {
 	var snapshot TermDataSnapshot
+	file, err := os.Open("termdata.json")
+	if !os.IsNotExist(err) {
+		return nil, errors.Wrap(err, "Couldn't open persisted term data")
+	}
 	if file != nil {
+		defer file.Close()
 		err := json.NewDecoder(file).Decode(&snapshot)
 		if err != nil {
-			// TODO: Proper error handling
-			log.Fatalf("File corrupted: %v", err)
+			return nil, errors.Wrap(err, "Couldn't decode term data file, file corrupted")
 		}
 	}
-	return &snapshot
+	return &snapshot, nil
 }

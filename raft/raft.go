@@ -51,13 +51,23 @@ func NewRaft(applyable Applyable, name, clusterAddress string, opts ... func(*Ra
 		return nil, errors.Wrap(err, "Couldn't setup cluster.")
 	}
 
+	entryLog, err := NewEntryLog()
+	if err != nil {
+		return nil, errors.Wrap(err, "Couldn't load entry log")
+	}
+
+	termData, err := NewTermData(cluster.LocalMember().Name)
+	if err != nil {
+		return nil, errors.Wrap(err, "COuldn't load term data")
+	}
+
 	raftInstance := &Raft{
 		cluster:     cluster,
 		clusterSize: 3,
 		applyable:   applyable,
 
-		termData: NewTermData(cluster.LocalMember().Name),
-		log:      NewEntryLog(),
+		termData: termData,
+		log:      entryLog,
 
 		commitIndex: atomic.NewInt64(0),
 		lastApplied: 0,
@@ -160,10 +170,15 @@ func (r *Raft) tick() error {
 }
 
 func (r *Raft) startElection() {
-	log.Println("*********** Starting election **************")
-	tdSnapshot := r.termData.InitiateElection()
-
 	r.resetElectionTimeout()
+
+	log.Println("*********** Starting election **************")
+	tdSnapshot, err := r.termData.InitiateElection()
+	if err != nil {
+		log.Println(errors.Wrap(err, "Couldn't initiate election"))
+		return
+	}
+
 	votes := 1
 	votesChan := make(chan bool)
 
@@ -432,7 +447,9 @@ func (r *Raft) AppendEntries(ctx context.Context, req *raft.AppendEntriesRequest
 		entry, err := r.log.Get(curLogIndex)
 		if err == nil {
 			if entry.Term != req.Term {
-				r.log.DeleteFrom(curLogIndex)
+				if err := r.log.DeleteFrom(curLogIndex); err != nil {
+					return nil, errors.Wrap(err, "Couldn't persist my cleared log")
+				}
 			} else {
 				shouldInsert = false
 			}
@@ -535,7 +552,10 @@ func (r *Raft) NewEntry(ctx context.Context, entry *raft.Entry) (*raft.EntryResp
 	entry.Term = tdSnapshot.Term
 
 	log.Println("****** Adding new entry to log as leader.")
-	entryIndex := r.log.Append(entry, tdSnapshot.Term)
+	entryIndex, err := r.log.Append(entry, tdSnapshot.Term)
+	if err != nil {
+		return nil, errors.Wrap(err, "Couldn't append entry to my log")
+	}
 
 	for {
 		if r.commitIndex.Load() >= entryIndex {

@@ -1,12 +1,12 @@
 package raft
 
 import (
+	"encoding/json"
+	"os"
+	"sync"
+
 	"github.com/cube2222/raft"
 	"github.com/pkg/errors"
-	"sync"
-	"os"
-	"encoding/json"
-	"log"
 )
 
 type entryLog struct {
@@ -24,6 +24,7 @@ func NewEntryLog() (*entryLog, error) {
 		return nil, errors.Wrap(err, "Couldn't open persisted commit log")
 	}
 	if file != nil {
+		defer file.Close()
 		err := json.NewDecoder(file).Decode(&l.log)
 		if err != nil {
 			return nil, errors.Wrap(err, "Couldn't decode commit log file, file corrupted")
