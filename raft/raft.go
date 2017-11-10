@@ -24,7 +24,6 @@ type Raft struct {
 	applyable   Applyable
 
 	// On all servers, in theory persistent
-	// TODO: Też tylko monotonicznie rosnący
 	// Term specific
 	termData *termData
 
@@ -158,7 +157,6 @@ func (r *Raft) tick() error {
 }
 
 func (r *Raft) startElection() {
-	// TODO: Jeśli elekcja się udała, ale potem jest już kolejny term, to jak zostaniemy liderem to będzie split brain.
 	log.Println("*********** Starting election **************")
 	tdSnapshot := r.termData.InitiateElection()
 
@@ -486,14 +484,14 @@ func (r *Raft) RequestVote(ctx context.Context, req *raft.RequestVoteRequest) (*
 	if tdSnapshot.VotedFor == "" || tdSnapshot.VotedFor == req.CandidateID {
 		if req.LastLogIndex >= curLastLogIndex && req.LastLogTerm >= curLastLogTerm {
 
-			tdSnapshot.VotedFor = req.CandidateID
+			if r.termData.SetVotedFor(tdSnapshot.Term, req.CandidateID) {
+				log.Printf("****** Voting for: %v ******", req.CandidateID)
 
-			log.Printf("****** Voting for: %v ******", tdSnapshot.VotedFor)
-
-			return &raft.RequestVoteResponse{
-				Term:        tdSnapshot.Term,
-				VoteGranted: true,
-			}, nil
+				return &raft.RequestVoteResponse{
+					Term:        tdSnapshot.Term,
+					VoteGranted: true,
+				}, nil
+			}
 		}
 	}
 

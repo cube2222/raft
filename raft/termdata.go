@@ -3,6 +3,9 @@ package raft
 import (
 	"context"
 	"sync"
+	"os"
+	"log"
+	"encoding/json"
 )
 
 type role int
@@ -27,10 +30,13 @@ type termData struct {
 }
 
 func NewTermData(nodeID string) *termData {
+	snapshot := loadSnapshot()
+
 	td := termData{
 		nodeID: nodeID,
 		role:   Follower,
-		term:   0,
+		term:   snapshot.Term,
+		votedFor: snapshot.VotedFor,
 	}
 	td.termContext, td.termContextCancel = context.WithCancel(context.Background())
 
@@ -54,6 +60,8 @@ func (td *termData) OverrideTerm(prevTerm, term int64) bool {
 
 	td.termContext, td.termContextCancel = context.WithCancel(context.Background())
 
+	td.getSnapshotInternal().persist()
+
 	return true
 }
 
@@ -70,7 +78,10 @@ func (td *termData) InitiateElection() (*TermDataSnapshot) {
 
 	td.termContext, td.termContextCancel = context.WithCancel(context.Background())
 
-	return td.getSnapshotInternal()
+	snapshot := td.getSnapshotInternal()
+	snapshot.persist()
+
+	return snapshot
 }
 
 func (td *termData) BecomeLeader(term int64) bool {
@@ -131,12 +142,26 @@ func (td *termData) GetTerm() int64 {
 	return td.term
 }
 
+func (td *termData) SetVotedFor(term int64, nodeID string) bool {
+	td.mutex.Lock()
+	defer td.mutex.Unlock()
+	if term != td.term {
+		return false
+	}
+	if td.votedFor != "" && td.votedFor != nodeID {
+		return false
+	}
+	td.votedFor = nodeID
+	td.getSnapshotInternal().persist()
+	return true
+}
+
 type TermDataSnapshot struct {
-	Leader      string
-	Role        role
-	Term        int64
-	TermContext context.Context
-	VotedFor    string
+	Leader      string `json:"-"`
+	Role        role `json:"-"`
+	Term        int64 `json:"term"`
+	TermContext context.Context `json:"-"`
+	VotedFor    string `json:"voted_for"`
 }
 
 func (td *termData) getSnapshotInternal() *TermDataSnapshot {
@@ -154,4 +179,29 @@ func (td *termData) GetSnapshot() *TermDataSnapshot {
 	defer td.mutex.RUnlock()
 
 	return td.getSnapshotInternal()
+}
+
+func (td *TermDataSnapshot) persist() {
+	file, err := os.Create("termdata.json")
+	if err != nil {
+		// TODO: Proper error handling
+		log.Fatalf("Why doesn't file io work :( ? %v", err)
+	}
+	defer file.Close()
+	json.NewEncoder(file).Encode(td)
+}
+
+func loadSnapshot() *TermDataSnapshot {
+	// TODO: Do fstat, then potentially open with error checking
+	file, _ := os.Open("termdata.json")
+	defer file.Close()
+	var snapshot TermDataSnapshot
+	if file != nil {
+		err := json.NewDecoder(file).Decode(&snapshot)
+		if err != nil {
+			// TODO: Proper error handling
+			log.Fatalf("File corrupted: %v", err)
+		}
+	}
+	return &snapshot
 }
