@@ -42,5 +42,5 @@ message RequestVoteResponse {
 }
 
 message EntryResponse {
-
+    string commandID = 1;
 }

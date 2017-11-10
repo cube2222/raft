@@ -14,15 +14,18 @@ import (
 	"bytes"
 	"github.com/pkg/errors"
 	"github.com/gorilla/mux"
+	"sync"
 )
 
 type AddObject struct {
-	ID     string      `json:"id"`
-	Object interface{} `json:"object"`
+	ID         string      `json:"id"`
+	Collection string      `json:"collection"`
+	Object     interface{} `json:"object"`
 }
 
 type MyApplyable struct {
-	Storage map[string]interface{}
+	Storage      map[string]map[string]interface{}
+	StorageMutex sync.RWMutex
 }
 
 func (ma *MyApplyable) Apply(entry *raft2.Entry) error {
@@ -33,14 +36,19 @@ func (ma *MyApplyable) Apply(entry *raft2.Entry) error {
 		return errors.Wrap(err, "Couldn't decode object")
 	}
 
-	ma.Storage[operation.ID] = operation.Object
+	ma.StorageMutex.Lock()
+	if _, ok := ma.Storage[operation.Collection]; !ok {
+		ma.Storage[operation.Collection] = make(map[string]interface{})
+	}
+	ma.Storage[operation.Collection][operation.ID] = operation.Object
+	ma.StorageMutex.Unlock()
 
 	return nil
 }
 
 func main() {
 	myApplyable := &MyApplyable{
-		make(map[string]interface{}),
+		Storage: make(map[string]map[string]interface{}),
 	}
 
 	config := LoadConfig()
@@ -86,9 +94,19 @@ func main() {
 			fmt.Fprintf(w, "ID: %s\n Term: %v\n Data:\n%s\n", entry.ID, entry.Term, entry.Data)
 		}
 	})
-	m.HandleFunc("/{id}", func(w http.ResponseWriter, r *http.Request) {
-		obj := myApplyable.Storage[mux.Vars(r)["id"]]
-		if obj == nil {
+	m.HandleFunc("/{collection}/{id}", func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+
+		myApplyable.StorageMutex.RLock()
+		defer myApplyable.StorageMutex.RUnlock()
+
+		collection, ok := myApplyable.Storage[vars["collection"]]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		obj, ok := collection[vars["id"]]
+		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
