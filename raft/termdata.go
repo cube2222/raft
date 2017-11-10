@@ -202,7 +202,7 @@ func (td *TermDataSnapshot) persist() error {
 func loadSnapshot() (*TermDataSnapshot, error) {
 	var snapshot TermDataSnapshot
 	file, err := os.Open("termdata.json")
-	if !os.IsNotExist(err) {
+	if err != nil && !os.IsNotExist(err) {
 		return nil, errors.Wrap(err, "Couldn't open persisted term data")
 	}
 	if file != nil {

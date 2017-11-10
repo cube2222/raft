@@ -20,7 +20,7 @@ func NewEntryLog() (*entryLog, error) {
 	}
 
 	file, err := os.Open("log.json")
-	if !os.IsNotExist(err) {
+	if err != nil && !os.IsNotExist(err) {
 		return nil, errors.Wrap(err, "Couldn't open persisted commit log")
 	}
 	if file != nil {
