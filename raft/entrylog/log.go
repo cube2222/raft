@@ -1,4 +1,4 @@
-package raft
+package entrylog
 
 import (
 	"encoding/json"
@@ -9,13 +9,13 @@ import (
 	"github.com/pkg/errors"
 )
 
-type entryLog struct {
+type EntryLog struct {
 	log   []raft.Entry
 	mutex sync.RWMutex
 }
 
-func NewEntryLog() (*entryLog, error) {
-	l := &entryLog{
+func NewEntryLog() (*EntryLog, error) {
+	l := &EntryLog{
 		log: make([]raft.Entry, 0),
 	}
 
@@ -34,7 +34,7 @@ func NewEntryLog() (*entryLog, error) {
 	return l, nil
 }
 
-func (l *entryLog) persist() error {
+func (l *EntryLog) persist() error {
 	file, err := os.Create("log.json")
 	if err != nil {
 		return errors.Wrap(err, "Couldn't create file to persist commit log")
@@ -46,7 +46,7 @@ func (l *entryLog) persist() error {
 	return nil
 }
 
-func (l *entryLog) Exists(index int64, term int64) bool {
+func (l *EntryLog) Exists(index int64, term int64) bool {
 	l.mutex.RLock()
 	defer l.mutex.RUnlock()
 
@@ -66,7 +66,7 @@ func (l *entryLog) Exists(index int64, term int64) bool {
 
 var ErrDoesNotExist = errors.Errorf("Entry does not exist")
 
-func (l *entryLog) Get(index int64) (*raft.Entry, error) {
+func (l *EntryLog) Get(index int64) (*raft.Entry, error) {
 	l.mutex.RLock()
 	defer l.mutex.RUnlock()
 
@@ -80,7 +80,7 @@ func (l *entryLog) Get(index int64) (*raft.Entry, error) {
 	return &l.log[index], nil
 }
 
-func (l *entryLog) DeleteFrom(index int64) error {
+func (l *EntryLog) DeleteFrom(index int64) error {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
 
@@ -96,7 +96,7 @@ func (l *entryLog) DeleteFrom(index int64) error {
 	)
 }
 
-func (l *entryLog) Append(entry *raft.Entry, term int64) (int64, error) {
+func (l *EntryLog) Append(entry *raft.Entry, term int64) (int64, error) {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
 
@@ -111,7 +111,7 @@ func (l *entryLog) Append(entry *raft.Entry, term int64) (int64, error) {
 	return int64(len(l.log)), nil
 }
 
-func (l *entryLog) MaxIndex() int64 {
+func (l *EntryLog) MaxIndex() int64 {
 	l.mutex.RLock()
 	defer l.mutex.RUnlock()
 
@@ -119,7 +119,7 @@ func (l *entryLog) MaxIndex() int64 {
 	return int64(len(l.log))
 }
 
-func (l *entryLog) GetLastEntry() *raft.Entry {
+func (l *EntryLog) GetLastEntry() *raft.Entry {
 	l.mutex.RLock()
 	defer l.mutex.RUnlock()
 
@@ -128,4 +128,14 @@ func (l *entryLog) GetLastEntry() *raft.Entry {
 	}
 
 	return &l.log[len(l.log)-1]
+}
+
+func (l *EntryLog) DebugData() []raft.Entry {
+	l.mutex.RLock()
+	defer l.mutex.RUnlock()
+
+	dest := make([]raft.Entry, len(l.log))
+	copy(dest, l.log)
+
+	return dest
 }

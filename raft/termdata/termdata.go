@@ -1,4 +1,4 @@
-package raft
+package termdata
 
 import (
 	"context"
@@ -6,22 +6,15 @@ import (
 	"os"
 	"sync"
 
+	"github.com/cube2222/raft"
 	"github.com/pkg/errors"
 )
 
-type role int
-
-const (
-	Follower  role = iota
-	Candidate
-	Leader
-)
-
-type termData struct {
+type TermData struct {
 	nodeID string
 
 	leader            string
-	role              role
+	role              raft.Role
 	term              int64
 	termContext       context.Context
 	termContextCancel context.CancelFunc
@@ -30,15 +23,15 @@ type termData struct {
 	mutex sync.RWMutex
 }
 
-func NewTermData(nodeID string) (*termData, error) {
+func NewTermData(nodeID string) (*TermData, error) {
 	snapshot, err := loadSnapshot()
 	if err != nil {
 		return nil, errors.Wrap(err, "Couldn't load snapshot")
 	}
 
-	td := termData{
+	td := TermData{
 		nodeID:   nodeID,
-		role:     Follower,
+		role:     raft.Follower,
 		term:     snapshot.Term,
 		votedFor: snapshot.VotedFor,
 	}
@@ -47,7 +40,7 @@ func NewTermData(nodeID string) (*termData, error) {
 	return &td, nil
 }
 
-func (td *termData) OverrideTerm(prevTerm, term int64) bool {
+func (td *TermData) OverrideTerm(prevTerm, term int64) bool {
 	td.mutex.Lock()
 	defer td.mutex.Unlock()
 
@@ -55,7 +48,7 @@ func (td *termData) OverrideTerm(prevTerm, term int64) bool {
 		return false
 	}
 
-	td.role = Follower
+	td.role = raft.Follower
 	td.term = term
 	td.votedFor = ""
 	td.leader = ""
@@ -69,11 +62,11 @@ func (td *termData) OverrideTerm(prevTerm, term int64) bool {
 	return true
 }
 
-func (td *termData) InitiateElection() (*TermDataSnapshot, error) {
+func (td *TermData) InitiateElection() (*TermDataSnapshot, error) {
 	td.mutex.Lock()
 	defer td.mutex.Unlock()
 
-	td.role = Candidate
+	td.role = raft.Candidate
 	td.term = td.term + 1
 	td.votedFor = td.nodeID
 	td.leader = ""
@@ -90,45 +83,45 @@ func (td *termData) InitiateElection() (*TermDataSnapshot, error) {
 	return snapshot, nil
 }
 
-func (td *termData) BecomeLeader(term int64) bool {
+func (td *TermData) BecomeLeader(term int64) bool {
 	td.mutex.Lock()
 	defer td.mutex.Unlock()
 	if td.term != term {
 		return false
 	}
 
-	td.role = Leader
+	td.role = raft.Leader
 	td.leader = td.nodeID
 	return true
 }
 
-func (td *termData) AbortElection() {
+func (td *TermData) AbortElection() {
 	td.mutex.Lock()
 	defer td.mutex.Unlock()
-	if td.role == Candidate {
-		td.role = Follower
+	if td.role == raft.Candidate {
+		td.role = raft.Follower
 	}
 }
 
-func (td *termData) GetRole() role {
+func (td *TermData) GetRole() raft.Role {
 	td.mutex.RLock()
 	defer td.mutex.RUnlock()
 	return td.role
 }
 
-func (td *termData) Context() context.Context {
+func (td *TermData) Context() context.Context {
 	td.mutex.RLock()
 	defer td.mutex.RUnlock()
 	return td.termContext
 }
 
-func (td *termData) GetLeader() string {
+func (td *TermData) GetLeader() string {
 	td.mutex.RLock()
 	defer td.mutex.RUnlock()
 	return td.leader
 }
 
-func (td *termData) SetLeader(leader string) {
+func (td *TermData) SetLeader(leader string) {
 	// If the leader is ok, don't create write contention
 	td.mutex.RLock()
 	prevLeader := td.leader
@@ -142,13 +135,13 @@ func (td *termData) SetLeader(leader string) {
 	td.leader = leader
 }
 
-func (td *termData) GetTerm() int64 {
+func (td *TermData) GetTerm() int64 {
 	td.mutex.RLock()
 	defer td.mutex.RUnlock()
 	return td.term
 }
 
-func (td *termData) SetVotedFor(term int64, nodeID string) bool {
+func (td *TermData) SetVotedFor(term int64, nodeID string) bool {
 	td.mutex.Lock()
 	defer td.mutex.Unlock()
 	if term != td.term {
@@ -164,13 +157,13 @@ func (td *termData) SetVotedFor(term int64, nodeID string) bool {
 
 type TermDataSnapshot struct {
 	Leader      string          `json:"-"`
-	Role        role            `json:"-"`
+	Role        raft.Role            `json:"-"`
 	Term        int64           `json:"term"`
 	TermContext context.Context `json:"-"`
 	VotedFor    string          `json:"voted_for"`
 }
 
-func (td *termData) getSnapshotInternal() *TermDataSnapshot {
+func (td *TermData) getSnapshotInternal() *TermDataSnapshot {
 	return &TermDataSnapshot{
 		Leader:      td.leader,
 		Role:        td.role,
@@ -180,7 +173,7 @@ func (td *termData) getSnapshotInternal() *TermDataSnapshot {
 	}
 }
 
-func (td *termData) GetSnapshot() *TermDataSnapshot {
+func (td *TermData) GetSnapshot() *TermDataSnapshot {
 	td.mutex.RLock()
 	defer td.mutex.RUnlock()
 
