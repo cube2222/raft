@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/cube2222/raft"
+	"github.com/cube2222/raft/raft/entrylog"
+	"github.com/cube2222/raft/raft/termdata"
 	"github.com/hashicorp/serf/serf"
 	"github.com/pkg/errors"
 	"github.com/satori/go.uuid"
@@ -27,9 +29,9 @@ type Raft struct {
 
 	// On all servers, persistent
 	// Term specific
-	termData *termData
+	termData *termdata.TermData
 
-	log *entryLog
+	log *entrylog.EntryLog
 
 	// On all servers, volatile
 	commitIndex *atomic.Int64
@@ -51,12 +53,12 @@ func NewRaft(applyable Applyable, name, clusterAddress string, opts ... func(*Ra
 		return nil, errors.Wrap(err, "Couldn't setup cluster.")
 	}
 
-	entryLog, err := NewEntryLog()
+	entryLog, err := entrylog.NewEntryLog()
 	if err != nil {
 		return nil, errors.Wrap(err, "Couldn't load entry log")
 	}
 
-	termData, err := NewTermData(cluster.LocalMember().Name)
+	termData, err := termdata.NewTermData(cluster.LocalMember().Name)
 	if err != nil {
 		return nil, errors.Wrap(err, "COuldn't load term data")
 	}
@@ -143,7 +145,7 @@ func (r *Raft) tick() error {
 	for commitIndex > r.lastApplied {
 		nextEntry, err := r.log.Get(r.lastApplied + 1)
 		if err != nil {
-			if err == ErrDoesNotExist {
+			if err == entrylog.ErrDoesNotExist {
 				log.Fatal("Commited entry is nonexistent. Shouldn't EVER happen.")
 			}
 			return errors.Wrap(err, "Couldn't get next entry to be applied")
@@ -156,11 +158,11 @@ func (r *Raft) tick() error {
 
 	ctx := r.termData.Context()
 	switch r.termData.GetRole() {
-	case Follower, Candidate:
+	case raft.Follower, raft.Candidate:
 		if time.Now().After(r.electionTimeout) {
 			r.startElection()
 		}
-	case Leader:
+	case raft.Leader:
 		tdSnapshot := r.termData.GetSnapshot()
 		r.propagateMessages(ctx, tdSnapshot)
 		r.updateCommitIndex()
@@ -218,7 +220,7 @@ func (r *Raft) startElection() {
 	}
 }
 
-func (r *Raft) askForVote(ctx context.Context, tdSnapshot *TermDataSnapshot, address string, voteChan chan<- bool) {
+func (r *Raft) askForVote(ctx context.Context, tdSnapshot *termdata.TermDataSnapshot, address string, voteChan chan<- bool) {
 	// TODO: Tu MUSI być cachowanie połączeń
 	conn, err := grpc.Dial(address, grpc.WithInsecure())
 	if err != nil {
@@ -270,7 +272,7 @@ func (r *Raft) initializeLeadership(ctx context.Context, term int64) {
 	r.leaderData = NewLeaderData(r.log.MaxIndex())
 }
 
-func (r *Raft) propagateMessages(ctx context.Context, tdSnapshot *TermDataSnapshot) {
+func (r *Raft) propagateMessages(ctx context.Context, tdSnapshot *termdata.TermDataSnapshot) {
 	ctx, _ = context.WithTimeout(ctx, time.Millisecond*60)
 	wg := sync.WaitGroup{}
 	for _, node := range r.cluster.Members() {
@@ -293,7 +295,7 @@ func (r *Raft) propagateMessages(ctx context.Context, tdSnapshot *TermDataSnapsh
 	wg.Wait()
 }
 
-func (r *Raft) sendAppendEntries(ctx context.Context, tdSnapshot *TermDataSnapshot, nodeID string, address string, empty bool) {
+func (r *Raft) sendAppendEntries(ctx context.Context, tdSnapshot *termdata.TermDataSnapshot, nodeID string, address string, empty bool) {
 	conn, err := grpc.Dial(address, grpc.WithInsecure())
 	if err != nil {
 		log.Printf("Error when dialing to send append entries: %v", err)
@@ -418,13 +420,13 @@ func (r *Raft) AppendEntries(ctx context.Context, req *raft.AppendEntriesRequest
 		log.Println("Becoming follower because of term override")
 		r.becomeFollower(tdSnapshot.Term, req.Term)
 	}
-	if tdSnapshot.Role == Candidate {
+	if tdSnapshot.Role == raft.Candidate {
 		r.termData.AbortElection()
 		tdSnapshot = r.termData.GetSnapshot()
 	}
 
 	// This really shouldn't happen, cause it's possible only with a split brain
-	if tdSnapshot.Role == Leader {
+	if tdSnapshot.Role == raft.Leader {
 		log.Fatal("Received append entries, even though I'm the leader with the current term.")
 	}
 
@@ -530,7 +532,7 @@ func (r *Raft) NewEntry(ctx context.Context, entry *raft.Entry) (*raft.EntryResp
 		entry.ID = uuid.NewV4().String()
 	}
 	tdSnapshot := r.termData.GetSnapshot()
-	if tdSnapshot.Role != Leader {
+	if tdSnapshot.Role != raft.Leader {
 		for _, node := range r.cluster.Members() {
 			if node.Name == tdSnapshot.Leader {
 				log.Printf("Redirecting new entry to leader: %v", tdSnapshot.Leader)
@@ -576,5 +578,5 @@ func (r *Raft) NewEntry(ctx context.Context, entry *raft.Entry) (*raft.EntryResp
 }
 
 func (r *Raft) GetDebugData() []raft.Entry {
-	return r.log.log
+	return r.log.DebugData()
 }
