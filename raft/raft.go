@@ -267,6 +267,7 @@ func (r *Raft) initializeLeadership(ctx context.Context, term int64) {
 	ok := r.termData.BecomeLeader(term)
 	if !ok {
 		log.Printf("*************** Couldn't become leader. Term: %v ******************", r.termData.GetTerm())
+		return
 	}
 
 	r.leaderData = NewLeaderData(r.log.MaxIndex())
@@ -277,6 +278,7 @@ func (r *Raft) propagateMessages(ctx context.Context, tdSnapshot *termdata.TermD
 	wg := sync.WaitGroup{}
 	for _, node := range r.cluster.Members() {
 		if node.Name != r.cluster.LocalMember().Name && node.Status == serf.StatusAlive {
+			// TODO: Connection caching
 			if r.leaderData.GetLastAppendEntries(node.Name).IsZero() {
 				wg.Add(1)
 				go func(node serf.Member) {
