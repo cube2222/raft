@@ -95,6 +95,7 @@ func main() {
 		}
 	})
 	m.HandleFunc("/{collection}/{id}", func(w http.ResponseWriter, r *http.Request) {
+		// TODO: Quorum read
 		vars := mux.Vars(r)
 
 		myApplyable.StorageMutex.RLock()
