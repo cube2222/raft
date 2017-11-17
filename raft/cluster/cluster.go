@@ -25,10 +25,10 @@ type connection struct {
 	term     int64
 }
 
-func NewCluster(localNodeName, clusterAddress string) (*Cluster, error) {
+func NewCluster(localNodeName string, clusterAddresses []string) (*Cluster, error) {
 	cluster, err := setupCluster(
 		localNodeName,
-		clusterAddress,
+		clusterAddresses,
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "Couldn't setup cluster")
@@ -42,7 +42,7 @@ func NewCluster(localNodeName, clusterAddress string) (*Cluster, error) {
 	}, nil
 }
 
-func setupCluster(nodeName string, clusterAddr string) (*serf.Serf, error) {
+func setupCluster(nodeName string, clusterAddresses []string) (*serf.Serf, error) {
 	conf := serf.DefaultConfig()
 	conf.Init()
 
@@ -53,7 +53,7 @@ func setupCluster(nodeName string, clusterAddr string) (*serf.Serf, error) {
 		return nil, errors.Wrap(err, "Couldn't create cluster")
 	}
 
-	_, err = cluster.Join([]string{clusterAddr}, true)
+	_, err = cluster.Join(clusterAddresses, true)
 	if err != nil {
 		log.Printf("Couldn't join cluster, starting own: %v\n", err)
 	}
