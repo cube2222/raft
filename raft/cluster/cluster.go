@@ -127,7 +127,7 @@ func (c *Cluster) GetRaftConnection(ctx context.Context, term int64, member stri
 		c.connectionsMutex.Lock()
 		c.connections[member] = connection{
 			grpcConn: grpcConn,
-			term: term,
+			term:     term,
 		}
 		c.connectionsMutex.Unlock()
 
@@ -136,7 +136,6 @@ func (c *Cluster) GetRaftConnection(ctx context.Context, term int64, member stri
 
 	return raft.NewRaftClient(conn.grpcConn), nil
 }
-
 
 func (c *Cluster) buildConnection(ctx context.Context, memberName string) (*grpc.ClientConn, error) {
 	member, err := c.GetMember(memberName)
