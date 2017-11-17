@@ -1,7 +1,6 @@
 package raft
 
 import (
-	"fmt"
 	"log"
 	"math/rand"
 	"sync"
@@ -16,7 +15,6 @@ import (
 	"github.com/satori/go.uuid"
 	"github.com/uber-go/atomic"
 	"golang.org/x/net/context"
-	"google.golang.org/grpc"
 )
 
 type Applyable interface {
@@ -46,6 +44,7 @@ type Raft struct {
 }
 
 func NewRaft(applyable Applyable, localNodeName, clusterAddress string, opts ... func(*Raft)) (*Raft, error) {
+	// Trying to connect to everybody in cluster
 	raftCluster, err := cluster.NewCluster(localNodeName, clusterAddress)
 	if err != nil {
 		return nil, errors.Wrap(err, "Couldn't initialize raft cluster")
@@ -156,9 +155,9 @@ func (r *Raft) startElection() {
 
 	wg := sync.WaitGroup{}
 
-	for _, node := range r.cluster.OtherHealthyMembers() {
+	for _, member := range r.cluster.OtherHealthyMembers() {
 		wg.Add(1)
-		go r.askForVote(tdSnapshot.TermContext, tdSnapshot, fmt.Sprintf("%v:%v", node.Addr, 8001), votesChan)
+		go r.askForVote(tdSnapshot.TermContext, tdSnapshot, member.Name, votesChan)
 	}
 
 	answersReceived := 0
@@ -188,16 +187,12 @@ func (r *Raft) startElection() {
 	}
 }
 
-func (r *Raft) askForVote(ctx context.Context, tdSnapshot *termdata.TermDataSnapshot, address string, voteChan chan<- bool) {
-	// TODO: Tu MUSI być cachowanie połączeń
-	conn, err := grpc.DialContext(ctx, address, grpc.WithInsecure())
+func (r *Raft) askForVote(ctx context.Context, tdSnapshot *termdata.TermDataSnapshot, member string, voteChan chan<- bool) {
+	cli, err := r.cluster.GetRaftConnection(ctx, tdSnapshot.Term, member)
 	if err != nil {
 		log.Printf("Error when dialing to ask for vote: %v", err)
 		return
 	}
-	defer conn.Close()
-
-	cli := raft.NewRaftClient(conn)
 
 	var lastIndexTerm int64 = 0
 	if maxEntry := r.log.GetLastEntry(); maxEntry != nil {
@@ -244,36 +239,33 @@ func (r *Raft) initializeLeadership(ctx context.Context, term int64) {
 func (r *Raft) propagateMessages(ctx context.Context, tdSnapshot *termdata.TermDataSnapshot) {
 	ctx, _ = context.WithTimeout(ctx, time.Millisecond*60)
 	wg := sync.WaitGroup{}
-	for _, node := range r.cluster.OtherHealthyMembers() {
+	for _, member := range r.cluster.OtherHealthyMembers() {
 		// TODO: Connection caching
-		if r.leaderData.GetLastAppendEntries(node.Name).IsZero() {
+		if r.leaderData.GetLastAppendEntries(member.Name).IsZero() {
 			wg.Add(1)
 			go func(node serf.Member) {
-				r.sendAppendEntries(ctx, tdSnapshot, node.Name, fmt.Sprintf("%v:%v", node.Addr, 8001), true)
+				r.sendAppendEntries(ctx, tdSnapshot, node.Name, true)
 				wg.Done()
-			}(node)
-		} else if r.log.MaxIndex() >= r.leaderData.GetNextIndex(node.Name) || time.Since(r.leaderData.GetLastAppendEntries(node.Name)) < time.Millisecond*200 {
+			}(member)
+		} else if r.log.MaxIndex() >= r.leaderData.GetNextIndex(member.Name) || time.Since(r.leaderData.GetLastAppendEntries(member.Name)) < time.Millisecond*200 {
 			wg.Add(1)
 			go func(node serf.Member) {
-				r.sendAppendEntries(ctx, tdSnapshot, node.Name, fmt.Sprintf("%v:%v", node.Addr, 8001), false)
+				r.sendAppendEntries(ctx, tdSnapshot, node.Name, false)
 				wg.Done()
-			}(node)
+			}(member)
 		}
 	}
 	wg.Wait()
 }
 
-func (r *Raft) sendAppendEntries(ctx context.Context, tdSnapshot *termdata.TermDataSnapshot, nodeID string, address string, empty bool) {
-	conn, err := grpc.DialContext(ctx, address, grpc.WithInsecure())
+func (r *Raft) sendAppendEntries(ctx context.Context, tdSnapshot *termdata.TermDataSnapshot, member string, empty bool) {
+	cli, err := r.cluster.GetRaftConnection(ctx, tdSnapshot.Term, member)
 	if err != nil {
 		log.Printf("Error when dialing to send append entries: %v", err)
 		return
 	}
-	defer conn.Close()
 
-	cli := raft.NewRaftClient(conn)
-
-	nextIndex := r.leaderData.GetNextIndex(nodeID)
+	nextIndex := r.leaderData.GetNextIndex(member)
 	prevIndex := nextIndex - 1
 	var prevTerm int64 = 0
 	entry, _ := r.log.Get(prevIndex)
@@ -300,11 +292,11 @@ func (r *Raft) sendAppendEntries(ctx context.Context, tdSnapshot *termdata.TermD
 		LeaderCommit: r.commitIndex.Load(),
 	})
 	if err != nil {
-		log.Printf("Couldn't send append entries to %v: %v", nodeID, err)
+		log.Printf("Couldn't send append entries to %v: %v", member, err)
 		return
 	}
 
-	r.leaderData.NoteAppendEntries(nodeID)
+	r.leaderData.NoteAppendEntries(member)
 
 	if tdSnapshot.Term < res.Term {
 		log.Println("Becoming follower because of term override")
@@ -314,14 +306,14 @@ func (r *Raft) sendAppendEntries(ctx context.Context, tdSnapshot *termdata.TermD
 
 	if res.Success {
 		if payload != nil {
-			r.leaderData.SetNextIndex(nodeID, nextIndex, nextIndex+1)
-			r.leaderData.NoteMatchIndex(nodeID, nextIndex)
+			r.leaderData.SetNextIndex(member, nextIndex, nextIndex+1)
+			r.leaderData.NoteMatchIndex(member, nextIndex)
 		} else {
-			r.leaderData.NoteMatchIndex(nodeID, prevIndex)
+			r.leaderData.NoteMatchIndex(member, prevIndex)
 		}
 	} else {
 		if nextIndex != 1 {
-			r.leaderData.SetNextIndex(nodeID, nextIndex, nextIndex-1)
+			r.leaderData.SetNextIndex(member, nextIndex, nextIndex-1)
 		}
 	}
 }
@@ -502,17 +494,14 @@ func (r *Raft) NewEntry(ctx context.Context, entry *raft.Entry) (*raft.EntryResp
 	}
 	tdSnapshot := r.termData.GetSnapshot()
 	if tdSnapshot.Role != raft.Leader {
-		for _, node := range r.cluster.OtherMembers() {
-			if node.Name == tdSnapshot.Leader {
+		for _, member := range r.cluster.OtherMembers() {
+			if member.Name == tdSnapshot.Leader {
 				log.Printf("Redirecting new entry to leader: %v", tdSnapshot.Leader)
-				conn, err := grpc.DialContext(ctx, fmt.Sprintf("%v:%v", node.Addr, 8001), grpc.WithInsecure())
+				cli, err := r.cluster.GetRaftConnection(ctx, tdSnapshot.Term, member.Name)
 				if err != nil {
 					log.Printf("Error when dialing to send append entries: %v", err)
 					return nil, err
 				}
-				defer conn.Close()
-
-				cli := raft.NewRaftClient(conn)
 
 				return cli.NewEntry(ctx, entry)
 			}

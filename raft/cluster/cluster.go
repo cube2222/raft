@@ -1,25 +1,28 @@
 package cluster
 
 import (
-	"log"
-
-	"sync"
-
 	"context"
 	"fmt"
+	"log"
+	"sync"
 
+	"github.com/cube2222/raft"
 	"github.com/hashicorp/serf/serf"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
-	"github.com/cube2222/raft"
 )
 
 type Cluster struct {
 	cluster *serf.Serf
 
-	connections      map[string]*grpc.ClientConn
+	connections      map[string]connection
 	connectionsMutex sync.RWMutex
+}
+
+type connection struct {
+	grpcConn *grpc.ClientConn
+	term     int64
 }
 
 func NewCluster(localNodeName, clusterAddress string) (*Cluster, error) {
@@ -31,7 +34,7 @@ func NewCluster(localNodeName, clusterAddress string) (*Cluster, error) {
 		return nil, errors.Wrap(err, "Couldn't setup cluster")
 	}
 
-	connections := make(map[string]*grpc.ClientConn)
+	connections := make(map[string]connection)
 
 	return &Cluster{
 		cluster:     cluster,
@@ -108,23 +111,32 @@ func (c *Cluster) GetMember(memberName string) (*serf.Member, error) {
 	return nil, errors.Errorf("Couldn't find member: %v", memberName)
 }
 
-func (c *Cluster) GetRaftConnection(ctx context.Context, member string) (raft.RaftClient, error) {
+func (c *Cluster) GetRaftConnection(ctx context.Context, term int64, member string) (raft.RaftClient, error) {
 	c.connectionsMutex.RLock()
 	conn, ok := c.connections[member]
 	c.connectionsMutex.RUnlock()
-	if !ok || conn.GetState() == connectivity.Shutdown {
-		var err error
-		conn, err = c.buildConnection(ctx, member)
+	if !ok || conn.grpcConn.GetState() == connectivity.Shutdown || conn.term < term {
+		if ok {
+			log.Printf("Building new connection. Old term %d new term %d", conn.term, term)
+			conn.grpcConn.Close()
+		}
+		grpcConn, err := c.buildConnection(ctx, member)
 		if err != nil {
 			return nil, errors.Wrapf(err, "Couldn't build new connection to %v", member)
 		}
 		c.connectionsMutex.Lock()
-		c.connections[member] = conn
+		c.connections[member] = connection{
+			grpcConn: grpcConn,
+			term: term,
+		}
 		c.connectionsMutex.Unlock()
+
+		return raft.NewRaftClient(grpcConn), nil
 	}
 
-	return raft.NewRaftClient(conn), nil
+	return raft.NewRaftClient(conn.grpcConn), nil
 }
+
 
 func (c *Cluster) buildConnection(ctx context.Context, memberName string) (*grpc.ClientConn, error) {
 	member, err := c.GetMember(memberName)
