@@ -58,7 +58,7 @@ func main() {
 		log.Fatal("Couldn't get hostname")
 	}
 
-	myRaft, err := raft.NewRaft(myApplyable, hostname, config.ClusterAddress)
+	myRaft, err := raft.NewRaft(myApplyable, hostname, config.ClusterAddresses)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -95,6 +95,7 @@ func main() {
 		}
 	})
 	m.HandleFunc("/{collection}/{id}", func(w http.ResponseWriter, r *http.Request) {
+		// TODO: Quorum read
 		vars := mux.Vars(r)
 
 		myApplyable.StorageMutex.RLock()
