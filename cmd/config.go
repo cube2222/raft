@@ -6,7 +6,7 @@ import (
 )
 
 type Config struct {
-	ClusterAddress   string
+	ClusterAddresses []string
 	BootstrapNodes   int
 }
 

@@ -58,7 +58,7 @@ func main() {
 		log.Fatal("Couldn't get hostname")
 	}
 
-	myRaft, err := raft.NewRaft(myApplyable, hostname, config.ClusterAddress)
+	myRaft, err := raft.NewRaft(myApplyable, hostname, config.ClusterAddresses)
 	if err != nil {
 		log.Fatal(err)
 	}
