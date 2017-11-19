@@ -4,20 +4,28 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/cube2222/raft"
-	"github.com/cube2222/raft/grpccache"
 	"github.com/hashicorp/serf/serf"
 	"github.com/pkg/errors"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 )
 
 type Cluster struct {
 	cluster *serf.Serf
 
-	connectionCache *grpccache.Cache
+	connections      map[string]connection
+	connectionsMutex sync.RWMutex
 }
 
-func NewCluster(ctx context.Context, localNodeName string, clusterAddresses []string) (*Cluster, error) {
+type connection struct {
+	grpcConn *grpc.ClientConn
+	term     int64
+}
+
+func NewCluster(localNodeName string, clusterAddresses []string) (*Cluster, error) {
 	cluster, err := setupCluster(
 		localNodeName,
 		clusterAddresses,
@@ -26,9 +34,11 @@ func NewCluster(ctx context.Context, localNodeName string, clusterAddresses []st
 		return nil, errors.Wrap(err, "Couldn't setup cluster")
 	}
 
+	connections := make(map[string]connection)
+
 	return &Cluster{
-		cluster:         cluster,
-		connectionCache: grpccache.NewCache(ctx),
+		cluster:     cluster,
+		connections: connections,
 	}, nil
 }
 
@@ -101,16 +111,41 @@ func (c *Cluster) GetMember(memberName string) (*serf.Member, error) {
 	return nil, errors.Errorf("Couldn't find member: %v", memberName)
 }
 
-func (c *Cluster) GetRaftConnection(ctx context.Context, member string) (raft.RaftClient, error) {
-	memberInfo, err := c.GetMember(member)
-	if err != nil {
-		return nil, errors.Wrap(err, "Inexistant member")
+func (c *Cluster) GetRaftConnection(ctx context.Context, term int64, member string) (raft.RaftClient, error) {
+	c.connectionsMutex.RLock()
+	conn, ok := c.connections[member]
+	c.connectionsMutex.RUnlock()
+	if !ok || conn.grpcConn.GetState() == connectivity.Shutdown || conn.term < term {
+		if ok {
+			log.Printf("Building new connection. Old term %d new term %d", conn.term, term)
+			conn.grpcConn.Close()
+		}
+		grpcConn, err := c.buildConnection(ctx, member)
+		if err != nil {
+			return nil, errors.Wrapf(err, "Couldn't build new connection to %v", member)
+		}
+		c.connectionsMutex.Lock()
+		c.connections[member] = connection{
+			grpcConn: grpcConn,
+			term:     term,
+		}
+		c.connectionsMutex.Unlock()
+
+		return raft.NewRaftClient(grpcConn), nil
 	}
 
-	conn, err := c.connectionCache.GetConnection(ctx, fmt.Sprintf("%v:%v", memberInfo.Addr, 8001))
+	return raft.NewRaftClient(conn.grpcConn), nil
+}
+
+func (c *Cluster) buildConnection(ctx context.Context, memberName string) (*grpc.ClientConn, error) {
+	member, err := c.GetMember(memberName)
 	if err != nil {
-		return nil, errors.Wrapf(err, "Couldn't get connection to member: %v", member)
+		return nil, errors.Wrap(err, "Couldn't get requested member")
+	}
+	conn, err := grpc.DialContext(ctx, fmt.Sprintf("%v:%v", member.Addr, 8001), grpc.WithInsecure())
+	if err != nil {
+		return nil, errors.Wrap(err, "Couldn't dial target node")
 	}
 
-	return raft.NewRaftClient(conn), nil
+	return conn, nil
 }

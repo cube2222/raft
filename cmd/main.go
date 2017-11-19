@@ -1,22 +1,20 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"io/ioutil"
-	"log"
-	"net"
-	"net/http"
-	"os"
-	"sync"
-
-	raft2 "github.com/cube2222/raft"
 	"github.com/cube2222/raft/raft"
-	"github.com/gorilla/mux"
-	"github.com/pkg/errors"
+	raft2 "github.com/cube2222/raft"
+	"log"
+	"os"
+	"net"
 	"google.golang.org/grpc"
+	"net/http"
+	"io/ioutil"
+	"fmt"
+	"encoding/json"
+	"bytes"
+	"github.com/pkg/errors"
+	"github.com/gorilla/mux"
+	"sync"
 )
 
 type AddObject struct {
@@ -60,8 +58,7 @@ func main() {
 		log.Fatal("Couldn't get hostname")
 	}
 
-	ctx := context.Background()
-	myRaft, err := raft.NewRaft(ctx, myApplyable, hostname, config.ClusterAddresses)
+	myRaft, err := raft.NewRaft(myApplyable, hostname, config.ClusterAddresses)
 	if err != nil {
 		log.Fatal(err)
 	}
