@@ -36,13 +36,13 @@ func NewCache(ctx context.Context) *Cache {
 	return cache
 }
 
-func (cache *Cache) GetConnection(ctx context.Context, address address) (*grpc.ClientConn, error) {
+func (cache *Cache) GetConnection(ctx context.Context, remoteAddress string) (*grpc.ClientConn, error) {
 	responseChan := make(chan *finishedConnection)
 
 	select {
 	case cache.requests <- &connectionRequest{
 		ctx:          ctx,
-		address:      address,
+		address:      address(remoteAddress),
 		responseChan: responseChan,
 	}:
 	case <-ctx.Done():

@@ -43,9 +43,9 @@ type Raft struct {
 	electionTimeout time.Time
 }
 
-func NewRaft(applyable Applyable, localNodeName string, clusterAddress []string, opts ... func(*Raft)) (*Raft, error) {
+func NewRaft(ctx context.Context, applyable Applyable, localNodeName string, clusterAddress []string, opts ... func(*Raft)) (*Raft, error) {
 	// Trying to connect to everybody in cluster
-	raftCluster, err := cluster.NewCluster(localNodeName, clusterAddress)
+	raftCluster, err := cluster.NewCluster(ctx, localNodeName, clusterAddress)
 	if err != nil {
 		return nil, errors.Wrap(err, "Couldn't initialize raft cluster")
 	}
@@ -188,7 +188,7 @@ func (r *Raft) startElection() {
 }
 
 func (r *Raft) askForVote(ctx context.Context, tdSnapshot *termdata.TermDataSnapshot, member string, voteChan chan<- bool) {
-	cli, err := r.cluster.GetRaftConnection(ctx, tdSnapshot.Term, member)
+	cli, err := r.cluster.GetRaftConnection(ctx, member)
 	if err != nil {
 		log.Printf("Error when dialing to ask for vote: %v", err)
 		return
@@ -259,7 +259,7 @@ func (r *Raft) propagateMessages(ctx context.Context, tdSnapshot *termdata.TermD
 }
 
 func (r *Raft) sendAppendEntries(ctx context.Context, tdSnapshot *termdata.TermDataSnapshot, member string, empty bool) {
-	cli, err := r.cluster.GetRaftConnection(ctx, tdSnapshot.Term, member)
+	cli, err := r.cluster.GetRaftConnection(ctx, member)
 	if err != nil {
 		log.Printf("Error when dialing to send append entries: %v", err)
 		return
@@ -355,8 +355,8 @@ func (r *Raft) updateCommitIndex() {
 }
 
 func (r *Raft) becomeFollower(prevTerm, term int64) {
-	r.termData.OverrideTerm(prevTerm, term)
 	r.resetElectionTimeout()
+	r.termData.OverrideTerm(prevTerm, term)
 }
 
 func (r *Raft) resetElectionTimeout() {
@@ -497,7 +497,7 @@ func (r *Raft) NewEntry(ctx context.Context, entry *raft.Entry) (*raft.EntryResp
 		for _, member := range r.cluster.OtherMembers() {
 			if member.Name == tdSnapshot.Leader {
 				log.Printf("Redirecting new entry to leader: %v", tdSnapshot.Leader)
-				cli, err := r.cluster.GetRaftConnection(ctx, tdSnapshot.Term, member.Name)
+				cli, err := r.cluster.GetRaftConnection(ctx, member.Name)
 				if err != nil {
 					log.Printf("Error when dialing to send append entries: %v", err)
 					return nil, err
