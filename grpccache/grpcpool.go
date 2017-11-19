@@ -7,7 +7,7 @@ import (
 	"google.golang.org/grpc"
 )
 
-type Cache struct {
+type ConnectionCache struct {
 	connections map[address]*grpc.ClientConn
 	requests    chan *connectionRequest
 }
@@ -26,8 +26,8 @@ type finishedConnection struct {
 	err        error
 }
 
-func NewCache(ctx context.Context) *Cache {
-	cache := &Cache{
+func NewConnectionCache(ctx context.Context) *ConnectionCache {
+	cache := &ConnectionCache{
 		connections: make(map[address]*grpc.ClientConn),
 		requests:    make(chan *connectionRequest),
 	}
@@ -36,7 +36,7 @@ func NewCache(ctx context.Context) *Cache {
 	return cache
 }
 
-func (cache *Cache) GetConnection(ctx context.Context, remoteAddress string) (*grpc.ClientConn, error) {
+func (cache *ConnectionCache) GetConnection(ctx context.Context, remoteAddress string) (*grpc.ClientConn, error) {
 	responseChan := make(chan *finishedConnection)
 
 	select {
@@ -57,7 +57,7 @@ func (cache *Cache) GetConnection(ctx context.Context, remoteAddress string) (*g
 	}
 }
 
-func (cache *Cache) loop(ctx context.Context) {
+func (cache *ConnectionCache) loop(ctx context.Context) {
 	waiting := make(map[address][]*connectionRequest)
 	finished := make(chan *finishedConnection)
 

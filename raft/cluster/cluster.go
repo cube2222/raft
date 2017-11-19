@@ -14,7 +14,7 @@ import (
 type Cluster struct {
 	cluster *serf.Serf
 
-	connectionCache *grpccache.Cache
+	connectionCache *grpccache.ConnectionCache
 }
 
 func NewCluster(ctx context.Context, localNodeName string, clusterAddresses []string) (*Cluster, error) {
@@ -28,7 +28,7 @@ func NewCluster(ctx context.Context, localNodeName string, clusterAddresses []st
 
 	return &Cluster{
 		cluster:         cluster,
-		connectionCache: grpccache.NewCache(ctx),
+		connectionCache: grpccache.NewConnectionCache(ctx),
 	}, nil
 }
 
