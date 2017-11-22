@@ -26,8 +26,13 @@ type AddObject struct {
 }
 
 type MyApplyable struct {
-	Storage      map[string]map[string]interface{}
+	Storage      map[string]map[string]Document
 	StorageMutex sync.RWMutex
+}
+
+type Document struct {
+	Object   interface{}
+	Revision int
 }
 
 func (ma *MyApplyable) Apply(entry *raft2.Entry) error {
@@ -40,9 +45,12 @@ func (ma *MyApplyable) Apply(entry *raft2.Entry) error {
 
 	ma.StorageMutex.Lock()
 	if _, ok := ma.Storage[operation.Collection]; !ok {
-		ma.Storage[operation.Collection] = make(map[string]interface{})
+		ma.Storage[operation.Collection] = make(map[string]Document)
 	}
-	ma.Storage[operation.Collection][operation.ID] = operation.Object
+	base := ma.Storage[operation.Collection][operation.ID]
+	base.Revision += 1
+	base.Object = operation.Object
+	ma.Storage[operation.Collection][operation.ID] = base
 	ma.StorageMutex.Unlock()
 
 	return nil
@@ -50,7 +58,7 @@ func (ma *MyApplyable) Apply(entry *raft2.Entry) error {
 
 func main() {
 	myApplyable := &MyApplyable{
-		Storage: make(map[string]map[string]interface{}),
+		Storage: make(map[string]map[string]Document),
 	}
 
 	config := LoadConfig()
@@ -96,6 +104,17 @@ func main() {
 		for _, entry := range entries {
 			fmt.Fprintf(w, "ID: %s\n Term: %v\n Data:\n%s\n", entry.ID, entry.Term, entry.Data)
 		}
+		fmt.Fprint(w, "Document store:\n")
+		myApplyable.StorageMutex.RLock()
+		for name, collection := range myApplyable.Storage {
+			fmt.Fprintf(w, "Collection %v :\n", name)
+			for id, document := range collection {
+				fmt.Fprintf(w, "ID: %s\n Document: %+v\n", id, document)
+			}
+			fmt.Fprint(w, "\n")
+		}
+		defer myApplyable.StorageMutex.RUnlock()
+
 	})
 	m.HandleFunc("/{collection}/{id}", func(w http.ResponseWriter, r *http.Request) {
 		// TODO: Quorum read
@@ -109,12 +128,12 @@ func main() {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		obj, ok := collection[vars["id"]]
+		document, ok := collection[vars["id"]]
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		if err := json.NewEncoder(w).Encode(&obj); err != nil {
+		if err := json.NewEncoder(w).Encode(&document.Object); err != nil {
 			fmt.Fprint(w, "Error when encoding object: %v", err)
 		}
 	})
