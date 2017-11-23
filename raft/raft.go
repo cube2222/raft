@@ -43,7 +43,7 @@ type Raft struct {
 	electionTimeout time.Time
 }
 
-func NewRaft(ctx context.Context, applyable Applyable, localNodeName string, clusterAddress []string, opts ... func(*Raft)) (*Raft, error) {
+func NewRaft(ctx context.Context, applyable Applyable, localNodeName string, clusterAddress []string, opts ... func(*Raft)) (raft.Raft, error) {
 	// Trying to connect to everybody in cluster
 	raftCluster, err := cluster.NewCluster(ctx, localNodeName, clusterAddress)
 	if err != nil {

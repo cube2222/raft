@@ -11,17 +11,17 @@ import (
 	"time"
 
 	"github.com/cube2222/raft"
-	raftimpl "github.com/cube2222/raft/raft"
 	"github.com/gorilla/mux"
 	"github.com/mitchellh/mapstructure"
 	"github.com/pkg/errors"
 )
 
+// Rozdziel na reader i writer
 type DocumentDatabase struct {
-	// Zrobić z tego Rafta interfejs w raft.go powierzchownym
-	Raft         raftimpl.Raft
-	Storage      map[string]map[string]Document
+	Raft raft.Raft
+
 	StorageMutex sync.RWMutex
+	Storage      map[string]map[string]Document
 }
 
 type Document struct {
@@ -30,18 +30,28 @@ type Document struct {
 	Revision int
 }
 
-type Operation struct {
-	Type      string
-	Operation map[string]interface{}
+func NewDocumentDatabase() *DocumentDatabase {
+	return &DocumentDatabase{
+		Storage: make(map[string]map[string]Document),
+	}
 }
 
-type Set struct {
+func (db *DocumentDatabase) SetRaftModule(raftModule raft.Raft) {
+	db.Raft = raftModule
+}
+
+type Operation struct {
+	Type      string      `json:"type"`
+	Operation interface{} `json:"operation"`
+}
+
+type Put struct {
 	ID         string      `json:"id"`
 	Collection string      `json:"collection"`
 	Object     interface{} `json:"object"`
 }
 
-const SetOperation = "set"
+const PutOperation = "put"
 
 type Clear struct {
 	ID         string `json:"id"`
@@ -61,20 +71,20 @@ func (db *DocumentDatabase) Apply(entry *raft.Entry) error {
 	db.StorageMutex.Lock()
 	defer db.StorageMutex.Unlock()
 	switch operation.Type {
-	case SetOperation:
-		var SetOperation Set
-		if err := mapstructure.Decode(operation.Operation, &SetOperation); err != nil {
+	case PutOperation:
+		var PutOperation Put
+		if err := mapstructure.Decode(operation.Operation, &PutOperation); err != nil {
 			return errors.Wrap(err, "Couldn't decode operation")
 		}
 
-		if _, ok := db.Storage[SetOperation.Collection]; !ok {
-			db.Storage[SetOperation.Collection] = make(map[string]Document)
+		if _, ok := db.Storage[PutOperation.Collection]; !ok {
+			db.Storage[PutOperation.Collection] = make(map[string]Document)
 		}
-		base := db.Storage[SetOperation.Collection][SetOperation.ID]
+		base := db.Storage[PutOperation.Collection][PutOperation.ID]
 		base.Revision += 1
-		base.Object = SetOperation.Object
+		base.Object = PutOperation.Object
 		base.Exists = false
-		db.Storage[SetOperation.Collection][SetOperation.ID] = base
+		db.Storage[PutOperation.Collection][PutOperation.ID] = base
 
 	case ClearOperation:
 		var ClearOperation Clear
@@ -92,6 +102,83 @@ func (db *DocumentDatabase) Apply(entry *raft.Entry) error {
 	}
 
 	return nil
+}
+
+func (db *DocumentDatabase) GetHTTPHandler() http.Handler {
+	m := mux.NewRouter()
+	m.HandleFunc("/{collection}/{id}", db.GetDocument).Methods(http.MethodGet)
+	m.HandleFunc("/", db.PutDocument).Methods(http.MethodPut)
+	m.HandleFunc("/{collection}/{id}", db.ClearDocument).Methods(http.MethodDelete)
+	m.HandleFunc("/debug", db.DebugInfo).Methods(http.MethodGet)
+	return m
+}
+
+func (db *DocumentDatabase) PutDocument(w http.ResponseWriter, r *http.Request) {
+	var putOperation Put
+	if err := json.NewDecoder(r.Body).Decode(&putOperation); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "Bad json body: %v", err)
+		return
+	}
+
+	genericOperation := Operation{
+		Type:      PutOperation,
+		Operation: putOperation,
+	}
+
+	buf := bytes.NewBuffer(nil)
+	if err := json.NewEncoder(buf).Encode(&genericOperation); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "Couldn't encode operation: %v", err)
+		return
+	}
+
+	_, err := db.Raft.NewEntry(r.Context(), &raft.Entry{
+		Data: buf.Bytes(),
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "Couldn't create new commit log entry: %v", err)
+		return
+	}
+}
+
+func (db *DocumentDatabase) ClearDocument(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	if vars["collection"] == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, "Missing collection name.")
+		return
+	}
+	if vars["id"] == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, "Missing document id.")
+		return
+	}
+
+	genericOperation := Operation{
+		Type: ClearOperation,
+		Operation: Clear{
+			Collection: vars["collection"],
+			ID:         vars["id"],
+		},
+	}
+
+	buf := bytes.NewBuffer(nil)
+	if err := json.NewEncoder(buf).Encode(&genericOperation); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "Couldn't encode operation: %v", err)
+		return
+	}
+
+	_, err := db.Raft.NewEntry(r.Context(), &raft.Entry{
+		Data: buf.Bytes(),
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, "Couldn't create new commit log entry: %v", err)
+		return
+	}
 }
 
 func (db *DocumentDatabase) GetDocument(w http.ResponseWriter, r *http.Request) {
@@ -114,6 +201,9 @@ func (db *DocumentDatabase) GetDocument(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+
+// Możesz ten wewnętrzny odczyt zrobić jednak na rafcie, a udostępniać interfejs http, tak że http szuka quorum
+// ale komunikacja do quorum jest po grpc, i tez lokalnie wtedy mozna to tak odpalić.
 func (db *DocumentDatabase) getUpToDateDocument(ctx context.Context, collection, id string) (*Document, error) {
 	resChan := make(chan *remoteDocumentResponse)
 
@@ -236,4 +326,22 @@ var documentNotFound = errors.New("Document does not exist")
 type remoteDocumentResponse struct {
 	doc *Document
 	err error
+}
+
+func (db *DocumentDatabase) DebugInfo(w http.ResponseWriter, r *http.Request) {
+	entries := db.Raft.GetDebugData()
+	for _, entry := range entries {
+		fmt.Fprintf(w, "ID: %s\n Term: %v\n Data:\n%s\n", entry.ID, entry.Term, entry.Data)
+	}
+	fmt.Fprint(w, "Document store:\n")
+
+	db.StorageMutex.RLock()
+	for name, collection := range db.Storage {
+		fmt.Fprintf(w, "Collection %v :\n", name)
+		for id, document := range collection {
+			fmt.Fprintf(w, "ID: %s\n Document: %+v\n", id, document)
+		}
+		fmt.Fprint(w, "\n")
+	}
+	defer db.StorageMutex.RUnlock()
 }
