@@ -43,7 +43,7 @@ type Raft struct {
 	electionTimeout time.Time
 }
 
-func NewRaft(ctx context.Context, applyable Applyable, localNodeName string, clusterAddress []string, opts ... func(*Raft)) (*Raft, error) {
+func NewRaft(ctx context.Context, applyable Applyable, localNodeName string, clusterAddress []string, opts ... func(*Raft)) (raft.Raft, error) {
 	// Trying to connect to everybody in cluster
 	raftCluster, err := cluster.NewCluster(ctx, localNodeName, clusterAddress)
 	if err != nil {
@@ -57,7 +57,7 @@ func NewRaft(ctx context.Context, applyable Applyable, localNodeName string, clu
 
 	termData, err := termdata.NewTermData(localNodeName)
 	if err != nil {
-		return nil, errors.Wrap(err, "COuldn't load term data")
+		return nil, errors.Wrap(err, "Couldn't load term data")
 	}
 
 	raftInstance := &Raft{
@@ -544,4 +544,12 @@ func (r *Raft) NewEntry(ctx context.Context, entry *raft.Entry) (*raft.EntryResp
 
 func (r *Raft) GetDebugData() []raft.Entry {
 	return r.log.DebugData()
+}
+
+func (r *Raft) QuorumSize() int {
+	return (r.clusterSize / 2) + 1
+}
+
+func (r *Raft) OtherHealthyMembers() []serf.Member {
+	return r.cluster.OtherHealthyMembers()
 }

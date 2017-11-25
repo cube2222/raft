@@ -1,5 +1,9 @@
 package raft
 
+import (
+	"github.com/hashicorp/serf/serf"
+)
+
 type Role int
 
 const (
@@ -7,3 +11,12 @@ const (
 	Candidate
 	Leader
 )
+
+type Raft interface {
+	RaftServer
+
+	Run()
+	GetDebugData() []Entry
+	QuorumSize() int
+	OtherHealthyMembers() []serf.Member
+}
