@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/cube2222/raft"
+	"github.com/cube2222/raft/cluster"
 	raftimpl "github.com/cube2222/raft/raft"
 	"github.com/cube2222/raft/testdb"
 	"google.golang.org/grpc"
@@ -23,8 +24,14 @@ func main() {
 		log.Fatal("Couldn't get hostname")
 	}
 
+	// Trying to connect to everybody in cluster
+	cluster, err := cluster.NewCluster(ctx, hostname, config.ClusterAddresses)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	ctx := context.Background()
-	myRaft, err := raftimpl.NewRaft(ctx, db, hostname, config.ClusterAddresses)
+	myRaft, err := raftimpl.NewRaft(ctx, cluster, db, hostname)
 	if err != nil {
 		log.Fatal(err)
 	}

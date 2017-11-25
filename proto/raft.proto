@@ -2,9 +2,9 @@ syntax = "proto3";
 package raft;
 
 service Raft {
-    rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
-    rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
-    rpc NewEntry(Entry) returns (EntryResponse);
+    rpc AppendEntries (AppendEntriesRequest) returns (AppendEntriesResponse);
+    rpc RequestVote (RequestVoteRequest) returns (RequestVoteResponse);
+    rpc NewEntry (Entry) returns (EntryResponse);
 }
 
 message Entry {
