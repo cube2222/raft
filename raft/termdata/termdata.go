@@ -157,7 +157,7 @@ func (td *TermData) SetVotedFor(term int64, nodeID string) bool {
 
 type TermDataSnapshot struct {
 	Leader      string          `json:"-"`
-	Role        raft.Role            `json:"-"`
+	Role        raft.Role       `json:"-"`
 	Term        int64           `json:"term"`
 	TermContext context.Context `json:"-"`
 	VotedFor    string          `json:"voted_for"`
