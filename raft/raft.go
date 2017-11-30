@@ -236,7 +236,6 @@ func (r *Raft) propagateMessages(ctx context.Context, tdSnapshot *termdata.TermD
 	ctx, _ = context.WithTimeout(ctx, time.Millisecond*60)
 	wg := sync.WaitGroup{}
 	for _, member := range r.cluster.OtherHealthyMembers() {
-		// TODO: Connection caching
 		if r.leaderData.GetLastAppendEntries(member.Name).IsZero() {
 			wg.Add(1)
 			go func(node serf.Member) {
