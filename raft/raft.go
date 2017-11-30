@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/cube2222/raft"
-	"github.com/cube2222/raft/raft/cluster"
+	"github.com/cube2222/raft/cluster"
 	"github.com/cube2222/raft/raft/entrylog"
 	"github.com/cube2222/raft/raft/termdata"
 	"github.com/hashicorp/serf/serf"
@@ -43,13 +43,7 @@ type Raft struct {
 	electionTimeout time.Time
 }
 
-func NewRaft(ctx context.Context, applyable Applyable, localNodeName string, clusterAddress []string, opts ... func(*Raft)) (raft.Raft, error) {
-	// Trying to connect to everybody in cluster
-	raftCluster, err := cluster.NewCluster(ctx, localNodeName, clusterAddress)
-	if err != nil {
-		return nil, errors.Wrap(err, "Couldn't initialize raft cluster")
-	}
-
+func NewRaft(ctx context.Context, cluster *cluster.Cluster, applyable Applyable, localNodeName string, opts ... func(*Raft)) (raft.Raft, error) {
 	entryLog, err := entrylog.NewEntryLog()
 	if err != nil {
 		return nil, errors.Wrap(err, "Couldn't load entry log")
@@ -61,7 +55,7 @@ func NewRaft(ctx context.Context, applyable Applyable, localNodeName string, clu
 	}
 
 	raftInstance := &Raft{
-		cluster:     raftCluster,
+		cluster:     cluster,
 		clusterSize: 3,
 		applyable:   applyable,
 
@@ -188,11 +182,13 @@ func (r *Raft) startElection() {
 }
 
 func (r *Raft) askForVote(ctx context.Context, tdSnapshot *termdata.TermDataSnapshot, member string, voteChan chan<- bool) {
-	cli, err := r.cluster.GetRaftConnection(ctx, member)
+	conn, err := r.cluster.GetgRPCConnection(ctx, member, 8001)
 	if err != nil {
 		log.Printf("Error when dialing to ask for vote: %v", err)
 		return
 	}
+
+	cli := raft.NewRaftClient(conn)
 
 	var lastIndexTerm int64 = 0
 	if maxEntry := r.log.GetLastEntry(); maxEntry != nil {
@@ -240,7 +236,6 @@ func (r *Raft) propagateMessages(ctx context.Context, tdSnapshot *termdata.TermD
 	ctx, _ = context.WithTimeout(ctx, time.Millisecond*60)
 	wg := sync.WaitGroup{}
 	for _, member := range r.cluster.OtherHealthyMembers() {
-		// TODO: Connection caching
 		if r.leaderData.GetLastAppendEntries(member.Name).IsZero() {
 			wg.Add(1)
 			go func(node serf.Member) {
@@ -259,11 +254,14 @@ func (r *Raft) propagateMessages(ctx context.Context, tdSnapshot *termdata.TermD
 }
 
 func (r *Raft) sendAppendEntries(ctx context.Context, tdSnapshot *termdata.TermDataSnapshot, member string, empty bool) {
-	cli, err := r.cluster.GetRaftConnection(ctx, member)
+	// TODO: Change 8001 to a const to listen on and to dial to
+	conn, err := r.cluster.GetgRPCConnection(ctx, member, 8001)
 	if err != nil {
 		log.Printf("Error when dialing to send append entries: %v", err)
 		return
 	}
+
+	cli := raft.NewRaftClient(conn)
 
 	nextIndex := r.leaderData.GetNextIndex(member)
 	prevIndex := nextIndex - 1
@@ -497,11 +495,13 @@ func (r *Raft) NewEntry(ctx context.Context, entry *raft.Entry) (*raft.EntryResp
 		for _, member := range r.cluster.OtherMembers() {
 			if member.Name == tdSnapshot.Leader {
 				log.Printf("Redirecting new entry to leader: %v", tdSnapshot.Leader)
-				cli, err := r.cluster.GetRaftConnection(ctx, member.Name)
+				conn, err := r.cluster.GetgRPCConnection(ctx, member.Name, 8001)
 				if err != nil {
 					log.Printf("Error when dialing to send append entries: %v", err)
 					return nil, err
 				}
+
+				cli := raft.NewRaftClient(conn)
 
 				return cli.NewEntry(ctx, entry)
 			}
@@ -544,12 +544,4 @@ func (r *Raft) NewEntry(ctx context.Context, entry *raft.Entry) (*raft.EntryResp
 
 func (r *Raft) GetDebugData() []raft.Entry {
 	return r.log.DebugData()
-}
-
-func (r *Raft) QuorumSize() int {
-	return (r.clusterSize / 2) + 1
-}
-
-func (r *Raft) OtherHealthyMembers() []serf.Member {
-	return r.cluster.OtherHealthyMembers()
 }

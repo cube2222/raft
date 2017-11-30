@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/cube2222/raft"
 	"github.com/cube2222/raft/grpccache"
 	"github.com/hashicorp/serf/serf"
 	"github.com/pkg/errors"
+	"google.golang.org/grpc"
 )
 
 type Cluster struct {
@@ -101,16 +101,16 @@ func (c *Cluster) GetMember(memberName string) (*serf.Member, error) {
 	return nil, errors.Errorf("Couldn't find member: %v", memberName)
 }
 
-func (c *Cluster) GetRaftConnection(ctx context.Context, member string) (raft.RaftClient, error) {
+func (c *Cluster) GetgRPCConnection(ctx context.Context, member string, port int) (*grpc.ClientConn, error) {
 	memberInfo, err := c.GetMember(member)
 	if err != nil {
 		return nil, errors.Wrap(err, "Inexistant member")
 	}
 
-	conn, err := c.connectionCache.GetConnection(ctx, fmt.Sprintf("%v:%v", memberInfo.Addr, 8001))
+	conn, err := c.connectionCache.GetConnection(ctx, fmt.Sprintf("%v:%v", memberInfo.Addr, port))
 	if err != nil {
 		return nil, errors.Wrapf(err, "Couldn't get connection to member: %v", member)
 	}
 
-	return raft.NewRaftClient(conn), nil
+	return conn, nil
 }
