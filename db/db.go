@@ -7,6 +7,7 @@ import (
 )
 
 type QueryHandler interface {
+	DBServer
 	raft.Applyable
 	HTTPHandler() http.Handler
 }

@@ -9,36 +9,38 @@ import (
 
 	"github.com/cube2222/raft"
 	"github.com/cube2222/raft/cluster"
+	"github.com/cube2222/raft/db"
+	"github.com/cube2222/raft/db/command"
+	"github.com/cube2222/raft/db/query"
 	raftimpl "github.com/cube2222/raft/raft"
-	"github.com/cube2222/raft/testdb"
+	"github.com/gorilla/mux"
 	"google.golang.org/grpc"
 )
 
 func main() {
-	db := testdb.NewDocumentDatabase()
-
+	ctx := context.Background()
 	config := LoadConfig()
 
 	hostname, err := os.Hostname()
 	if err != nil {
-		log.Fatal("Couldn't get hostname")
+		log.Fatalf("Couldn't get hostname: %v", err)
 	}
 
 	// Trying to connect to everybody in cluster
-	cluster, err := cluster.NewCluster(ctx, hostname, config.ClusterAddresses)
+	dbCluster, err := cluster.NewCluster(ctx, hostname, config.ClusterAddresses)
+	if err != nil {
+		log.Fatalf("Couldn't setup new cluster: %v", err)
+	}
+
+	queryHandler := query.NewQueryHandler(dbCluster)
+	if err != nil {
+		log.Fatalf("Couldn't set up query handler: %v", err)
+	}
+
+	myRaft, err := raftimpl.NewRaft(ctx, dbCluster, queryHandler, hostname)
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	ctx := context.Background()
-	myRaft, err := raftimpl.NewRaft(ctx, cluster, db, hostname)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// You could in theory create one read interface and one write interface for the document db so there
-	// isn't any circular coupling.
-	db.SetRaftModule(myRaft)
 
 	lis, err := net.Listen("tcp", ":8001")
 	if err != nil {
@@ -46,10 +48,17 @@ func main() {
 	}
 	s := grpc.NewServer()
 	raft.RegisterRaftServer(s, myRaft)
+	db.RegisterDBServer(s, queryHandler)
+
+	commandHandler := command.NewCommandHandler(myRaft)
 
 	go myRaft.Run()
 
-	go http.ListenAndServe(":8002", db.GetHTTPHandler())
+	m := mux.NewRouter()
+	m.PathPrefix("/command").Subrouter().NewRoute().Handler(http.StripPrefix("/command", commandHandler.HTTPHandler()))
+	m.PathPrefix("/query").Subrouter().NewRoute().Handler(http.StripPrefix("/query", queryHandler.HTTPHandler()))
+
+	go http.ListenAndServe(":8002", m)
 
 	if err := s.Serve(lis); err != nil {
 		log.Fatal(err)

@@ -22,30 +22,41 @@ type queryHandler struct {
 	storageMutex sync.RWMutex
 	storage      map[string]map[string]Document
 
-	cluster cluster.Cluster
+	cluster *cluster.Cluster
 }
 
-func (handler *queryHandler) GetDocument(context.Context, *db.DocumentRequest) (*db.EncodedDocument, error) {
-	panic("implement me")
-}
-
-type Document struct {
-	Object   interface{}
-	Exists   bool
-	Revision int
-}
-
-func NewQueryHandler() db.QueryHandler {
+func NewQueryHandler(cluster *cluster.Cluster) db.QueryHandler {
 	return &queryHandler{
 		storage: make(map[string]map[string]Document),
+		cluster: cluster,
 	}
 }
 
-func (handler *queryHandler) HTTPHandler() http.Handler {
-	m := mux.NewRouter()
-	m.HandleFunc("/{collection}/{id}", handler.getDocument).Methods(http.MethodGet)
-	//m.HandleFunc("/debug", handler).Methods(http.MethodGet)
-	return m
+func (handler *queryHandler) GetDocument(ctx context.Context, r *db.DocumentRequest) (*db.EncodedDocument, error) {
+	doc := handler.getLocalDocument(r.Collection, r.Id)
+
+	encoded, err := encodeDocument(doc)
+	if err != nil {
+		return nil, errors.Wrap(err, "Couldn't encode document")
+	}
+
+	return encoded, nil
+}
+
+func (handler *queryHandler) getLocalDocument(collectionName, id string) *Document {
+	handler.storageMutex.RLock()
+	defer handler.storageMutex.RUnlock()
+
+	collection, ok := handler.storage[collectionName]
+	if !ok {
+		return &Document{Exists: false}
+	}
+	document, ok := collection[id]
+	if !ok {
+		return &Document{Exists: false}
+	}
+
+	return &document
 }
 
 func (handler *queryHandler) Apply(entry *raft.Entry) error {
@@ -71,7 +82,7 @@ func (handler *queryHandler) Apply(entry *raft.Entry) error {
 		base := handler.storage[PutOperation.Collection][PutOperation.ID]
 		base.Revision += 1
 		base.Object = PutOperation.Object
-		base.Exists = false
+		base.Exists = true
 		handler.storage[PutOperation.Collection][PutOperation.ID] = base
 
 	case db.ClearOperation:
@@ -85,11 +96,19 @@ func (handler *queryHandler) Apply(entry *raft.Entry) error {
 			break
 		}
 		base := handler.storage[ClearOperation.Collection][ClearOperation.ID]
-		base.Exists = true
+		base.Revision += 1
+		base.Exists = false
 		handler.storage[ClearOperation.Collection][ClearOperation.ID] = base
 	}
 
 	return nil
+}
+
+func (handler *queryHandler) HTTPHandler() http.Handler {
+	m := mux.NewRouter()
+	m.HandleFunc("/{collection}/{id}", handler.getDocument).Methods(http.MethodGet)
+	m.HandleFunc("/debug", handler.debugInfo).Methods(http.MethodGet)
+	return m
 }
 
 func (handler *queryHandler) getDocument(w http.ResponseWriter, r *http.Request) {
@@ -102,7 +121,7 @@ func (handler *queryHandler) getDocument(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if doc.Exists == false {
+	if !doc.Exists {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -121,7 +140,7 @@ func (handler *queryHandler) getUpToDateDocument(ctx context.Context, collection
 	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
 
 	for _, member := range others {
-		go getDocumentFromNode(ctx, fmt.Sprintf("%s:8002", member.Addr), collection, id, resChan)
+		go handler.getDocumentFromNode(ctx, member.Name, collection, id, resChan)
 	}
 
 	oks := 1
@@ -129,11 +148,7 @@ func (handler *queryHandler) getUpToDateDocument(ctx context.Context, collection
 	for i := 0; i < len(others); i++ {
 		res := <-resChan
 		if res.err != nil {
-			if res.err == documentNotFound {
-				oks += 1
-				responses = append(responses, &Document{Exists: true})
-				continue
-			}
+			log.Printf("Couldn't get response from member: %v", res.member)
 			continue
 		}
 
@@ -168,70 +183,57 @@ func drain(n int, channel chan *remoteDocumentResponse) {
 	close(channel)
 }
 
-func (handler *queryHandler) getLocalDocument(collectionName, id string) *Document {
-	handler.storageMutex.RLock()
-	defer handler.storageMutex.RUnlock()
-
-	collection, ok := handler.storage[collectionName]
-	if !ok {
-		return &Document{Exists: false}
-	}
-	document, ok := collection[id]
-	if !ok {
-		return &Document{Exists: false}
+func (handler *queryHandler) getDocumentFromNode(ctx context.Context, member, collection, id string, resChan chan<- *remoteDocumentResponse) {
+	res := &remoteDocumentResponse{
+		member: member,
 	}
 
-	return &document
-}
-
-func getDocumentFromNode(ctx context.Context, address, collection, id string, resChan chan<- *remoteDocumentResponse) {
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://%s/%s/%s", address, collection, id), nil)
+	// TODO: Make this port configurable.
+	conn, err := handler.cluster.GetgRPCConnection(ctx, member, 8001)
 	if err != nil {
-		resChan <- &remoteDocumentResponse{
-			err: errors.Wrap(err, "Couldn't create request to get document"),
-		}
+		res.err = errors.Wrap(err, "Couldn't get gRPC connection")
+		resChan <- res
 		return
 	}
-	req = req.WithContext(ctx)
 
-	res, err := http.DefaultClient.Do(req)
+	cli := db.NewDBClient(conn)
+	encoded, err := cli.GetDocument(ctx, &db.DocumentRequest{
+		Collection: collection,
+		Id:         id,
+	})
 	if err != nil {
-		resChan <- &remoteDocumentResponse{
-			err: errors.Wrap(err, "Couldn't do request to get document"),
-		}
+		res.err = errors.Wrap(err, "Couldn't get document")
+		resChan <- res
 		return
 	}
 
-	if res.StatusCode == http.StatusNotFound {
-		resChan <- &remoteDocumentResponse{
-			err: documentNotFound,
-		}
-		return
-	}
-	if res.StatusCode != http.StatusOK {
-		resChan <- &remoteDocumentResponse{
-			err: errors.Errorf("Unindentified error code %v", res.StatusCode),
-		}
-		return
-	}
-
-	var doc Document
-	err = json.NewDecoder(res.Body).Decode(&doc)
+	doc, err := decodeDocument(encoded)
 	if err != nil {
-		resChan <- &remoteDocumentResponse{
-			err: errors.Wrap(err, "Couldn't decode document"),
-		}
+		res.err = errors.Wrap(err, "Couldn't decode encoded document")
+		resChan <- res
 		return
 	}
 
-	resChan <- &remoteDocumentResponse{
-		doc: &doc,
-	}
+	res.doc = doc
+	resChan <- res
 }
 
 var documentNotFound = errors.New("Document does not exist")
 
 type remoteDocumentResponse struct {
-	doc *Document
-	err error
+	member string
+	doc    *Document
+	err    error
+}
+
+func (handler *queryHandler) debugInfo(w http.ResponseWriter, r *http.Request) {
+	handler.storageMutex.RLock()
+	defer handler.storageMutex.RUnlock()
+	for name, collection := range handler.storage {
+		fmt.Fprintf(w, "Collection %v :\n", name)
+		for id, document := range collection {
+			fmt.Fprintf(w, "ID: %s\n Document: %+v\n", id, document)
+		}
+		fmt.Fprint(w, "\n")
+	}
 }

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/cube2222/raft"
 	"github.com/cube2222/raft/grpccache"
 	"github.com/hashicorp/serf/serf"
 	"github.com/pkg/errors"

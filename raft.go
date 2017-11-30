@@ -1,9 +1,5 @@
 package raft
 
-import (
-	"github.com/hashicorp/serf/serf"
-)
-
 type Role int
 
 const (
@@ -17,6 +13,4 @@ type Raft interface {
 
 	Run()
 	GetDebugData() []Entry
-	QuorumSize() int
-	OtherHealthyMembers() []serf.Member
 }
