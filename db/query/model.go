@@ -16,7 +16,7 @@ type Document struct {
 func encodeDocument(doc *Document) (*db.EncodedDocument, error) {
 	encoded := &db.EncodedDocument{
 		Revision: int64(doc.Revision),
-		Exists: doc.Exists,
+		Exists:   doc.Exists,
 	}
 
 	if !encoded.Exists {
@@ -35,7 +35,7 @@ func encodeDocument(doc *Document) (*db.EncodedDocument, error) {
 func decodeDocument(encoded *db.EncodedDocument) (*Document, error) {
 	doc := &Document{
 		Revision: int(encoded.Revision),
-		Exists: encoded.Exists,
+		Exists:   encoded.Exists,
 	}
 
 	if !doc.Exists {
