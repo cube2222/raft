@@ -26,6 +26,7 @@ type finishedConnection struct {
 	err        error
 }
 
+// Creates a new connection cache. It shuts off when the context cancels.
 func NewConnectionCache(ctx context.Context) *ConnectionCache {
 	cache := &ConnectionCache{
 		connections: make(map[address]*grpc.ClientConn),

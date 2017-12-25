@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -26,23 +27,29 @@ func main() {
 		log.Fatalf("Couldn't get hostname: %v", err)
 	}
 
-	// Trying to connect to everybody in cluster
+	// Trying to connect to everybody in the cluster
 	dbCluster, err := cluster.NewCluster(ctx, hostname, config.ClusterAddresses)
 	if err != nil {
 		log.Fatalf("Couldn't setup new cluster: %v", err)
 	}
 
-	queryHandler := query.NewQueryHandler(dbCluster)
+	queryHandler := query.NewQueryHandler(dbCluster, config.ClusterSize, config.RPCPort)
 	if err != nil {
 		log.Fatalf("Couldn't set up query handler: %v", err)
 	}
 
-	myRaft, err := raftimpl.NewRaft(ctx, dbCluster, queryHandler, hostname)
+	myRaft, err := raftimpl.NewRaft(
+		ctx,
+		dbCluster,
+		queryHandler,
+		hostname,
+		raftimpl.WithBootstrapClusterSize(config.ClusterSize),
+		raftimpl.WithRPCPort(config.RPCPort))
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	lis, err := net.Listen("tcp", ":8001")
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%v", config.RPCPort))
 	if err != nil {
 		log.Fatal(err)
 	}

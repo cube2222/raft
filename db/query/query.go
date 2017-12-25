@@ -19,25 +19,22 @@ type queryHandler struct {
 	storageMutex sync.RWMutex
 	storage      map[string]map[string]Document
 
-	cluster *cluster.Cluster
+	cluster     *cluster.Cluster
+	clusterSize int
+	rpcPort     int
 }
 
-func NewQueryHandler(cluster *cluster.Cluster) db.QueryHandler {
+// Creates a new query handler
+// The cluster size is the expected cluster size to take into account
+// for quorum calculation.
+// The quorum size will be 1 + clusterSize/2
+func NewQueryHandler(cluster *cluster.Cluster, clusterSize int, rpcPort int) db.QueryHandler {
 	return &queryHandler{
-		storage: make(map[string]map[string]Document),
-		cluster: cluster,
+		storage:     make(map[string]map[string]Document),
+		cluster:     cluster,
+		clusterSize: clusterSize,
+		rpcPort:     rpcPort,
 	}
-}
-
-func (handler *queryHandler) GetDocument(ctx context.Context, r *db.DocumentRequest) (*db.EncodedDocument, error) {
-	doc := handler.getLocalDocument(r.Collection, r.Id)
-
-	encoded, err := encodeDocument(doc)
-	if err != nil {
-		return nil, errors.Wrap(err, "Couldn't encode document")
-	}
-
-	return encoded, nil
 }
 
 func (handler *queryHandler) getLocalDocument(collectionName, id string) *Document {
@@ -92,6 +89,10 @@ func (handler *queryHandler) Apply(entry *raft.Entry) error {
 			// Collection doesn't exist => Object doesn't exist too.
 			break
 		}
+		if _, ok := handler.storage[ClearOperation.Collection][ClearOperation.ID]; !ok {
+			// Object doesn't exist.
+			break
+		}
 		base := handler.storage[ClearOperation.Collection][ClearOperation.ID]
 		base.Revision += 1
 		base.Exists = false
@@ -105,7 +106,7 @@ func (handler *queryHandler) getUpToDateDocument(ctx context.Context, collection
 	resChan := make(chan *remoteDocumentResponse)
 
 	others := handler.cluster.OtherHealthyMembers()
-	quorum := 1 + handler.cluster.NumMembers()/2
+	quorum := 1 + handler.clusterSize/2
 
 	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
 
@@ -153,13 +154,18 @@ func drain(n int, channel chan *remoteDocumentResponse) {
 	close(channel)
 }
 
+type remoteDocumentResponse struct {
+	member string
+	doc    *Document
+	err    error
+}
+
 func (handler *queryHandler) getDocumentFromNode(ctx context.Context, member, collection, id string, resChan chan<- *remoteDocumentResponse) {
 	res := &remoteDocumentResponse{
 		member: member,
 	}
 
-	// TODO: Make this port configurable.
-	conn, err := handler.cluster.GetgRPCConnection(ctx, member, 8001)
+	conn, err := handler.cluster.GetgRPCConnection(ctx, member, handler.rpcPort)
 	if err != nil {
 		res.err = errors.Wrap(err, "Couldn't get gRPC connection")
 		resChan <- res
@@ -186,10 +192,4 @@ func (handler *queryHandler) getDocumentFromNode(ctx context.Context, member, co
 
 	res.doc = doc
 	resChan <- res
-}
-
-type remoteDocumentResponse struct {
-	member string
-	doc    *Document
-	err    error
 }

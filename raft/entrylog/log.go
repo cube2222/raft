@@ -96,7 +96,7 @@ func (l *EntryLog) DeleteFrom(index int64) error {
 	)
 }
 
-func (l *EntryLog) Append(entry *raft.Entry, term int64) (int64, error) {
+func (l *EntryLog) Append(entry *raft.Entry) (int64, error) {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
 
@@ -107,7 +107,8 @@ func (l *EntryLog) Append(entry *raft.Entry, term int64) (int64, error) {
 		l.log = l.log[:len(l.log)-1]
 		return -1, errors.Wrap(err, "Couldn't persist log")
 	}
-	// Keep in mind, indexes are from 1.
+	// Keep in mind, indexes are from 1, so the length
+	// will actually be the last index.
 	return int64(len(l.log)), nil
 }
 
@@ -115,7 +116,8 @@ func (l *EntryLog) MaxIndex() int64 {
 	l.mutex.RLock()
 	defer l.mutex.RUnlock()
 
-	// Not subtracting 1 is not a bug, indexes are from 1, so we have to subtract a one, but also add it, so we have the proper index.
+	// Not subtracting 1 is not a bug, indexes are from 1,
+	// so we have to subtract a one, but also add one, so we have the proper index.
 	return int64(len(l.log))
 }
 

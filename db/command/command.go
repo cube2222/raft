@@ -2,6 +2,7 @@ package command
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"github.com/cube2222/raft"
 	"github.com/cube2222/raft/db"
 	"github.com/gorilla/mux"
+	"github.com/pkg/errors"
 )
 
 type commandHandler struct {
@@ -37,25 +39,16 @@ func (handler *commandHandler) putDocument(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Label tha payload as a put operation
 	genericOperation := db.Operation{
 		Type:      db.PutOperation,
 		Operation: putOperation,
 	}
 
-	buf := bytes.NewBuffer(nil)
-	if err := json.NewEncoder(buf).Encode(&genericOperation); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprintf(w, "Couldn't encode operation: %v", err)
-		return
-	}
-
-	_, err := handler.raft.NewEntry(r.Context(), &raft.Entry{
-		Data: buf.Bytes(),
-	})
+	err := handler.addToLog(r.Context(), genericOperation)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprintf(w, "Couldn't create new commit log entry: %v", err)
-		return
+		fmt.Fprintf(w, "Couldn't add operation to log: %v", err)
 	}
 }
 
@@ -72,6 +65,8 @@ func (handler *commandHandler) clearDocument(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Create a clear operation with the parameters supplied by the client
+	// by means of query parameters.
 	genericOperation := db.Operation{
 		Type: db.ClearOperation,
 		Operation: db.Clear{
@@ -80,21 +75,29 @@ func (handler *commandHandler) clearDocument(w http.ResponseWriter, r *http.Requ
 		},
 	}
 
-	buf := bytes.NewBuffer(nil)
-	if err := json.NewEncoder(buf).Encode(&genericOperation); err != nil {
+	err := handler.addToLog(r.Context(), genericOperation)
+	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprintf(w, "Couldn't encode operation: %v", err)
-		return
+		fmt.Fprintf(w, "Couldn't add operation to log: %v", err)
+	}
+}
+
+func (handler *commandHandler) addToLog(ctx context.Context, operation db.Operation) error {
+	// Encode the whole operation as a message to put into the commit log
+	buf := bytes.NewBuffer(nil)
+	if err := json.NewEncoder(buf).Encode(&operation); err != nil {
+		return errors.Wrap(err, "Couldn't encode operation")
 	}
 
-	_, err := handler.raft.NewEntry(r.Context(), &raft.Entry{
+	// Add the resulting message (operation) to the commit log
+	_, err := handler.raft.NewEntry(ctx, &raft.Entry{
 		Data: buf.Bytes(),
 	})
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, "Couldn't create new commit log entry: %v", err)
-		return
+		return errors.Wrap(err, "Couldn't encode operation")
 	}
+
+	return nil
 }
 
 func (handler *commandHandler) DebugInfo(w http.ResponseWriter, r *http.Request) {

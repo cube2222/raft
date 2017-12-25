@@ -51,9 +51,9 @@ func (td *TermData) OverrideTerm(prevTerm, term int64) bool {
 	td.role = raft.Follower
 	td.term = term
 	td.votedFor = ""
+	td.termContextCancel()
 	td.leader = ""
 
-	td.termContextCancel()
 
 	td.termContext, td.termContextCancel = context.WithCancel(context.Background())
 
@@ -121,18 +121,23 @@ func (td *TermData) GetLeader() string {
 	return td.leader
 }
 
-func (td *TermData) SetLeader(leader string) {
+func (td *TermData) SetLeader(term int64, leader string) bool {
 	// If the leader is ok, don't create write contention
 	td.mutex.RLock()
 	prevLeader := td.leader
 	td.mutex.RUnlock()
 	if prevLeader == leader {
-		return
+		return true
 	}
 
 	td.mutex.Lock()
 	defer td.mutex.Unlock()
+	if term != td.term {
+		return false
+	}
 	td.leader = leader
+
+	return true
 }
 
 func (td *TermData) GetTerm() int64 {

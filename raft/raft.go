@@ -24,6 +24,7 @@ type Applyable interface {
 type Raft struct {
 	cluster     *cluster.Cluster
 	clusterSize int
+	rpcPort     int
 	applyable   Applyable
 
 	// On all servers, persistent
@@ -57,6 +58,7 @@ func NewRaft(ctx context.Context, cluster *cluster.Cluster, applyable Applyable,
 	raftInstance := &Raft{
 		cluster:     cluster,
 		clusterSize: 3,
+		rpcPort:     8001,
 		applyable:   applyable,
 
 		termData: termData,
@@ -79,6 +81,12 @@ func NewRaft(ctx context.Context, cluster *cluster.Cluster, applyable Applyable,
 func WithBootstrapClusterSize(n int) func(r *Raft) {
 	return func(r *Raft) {
 		r.clusterSize = n
+	}
+}
+
+func WithRPCPort(port int) func(r *Raft) {
+	return func(r *Raft) {
+		r.rpcPort = port
 	}
 }
 
@@ -161,9 +169,8 @@ func (r *Raft) startElection() {
 		case vote := <-votesChan:
 			if vote == true {
 				votes += 1
-			} else {
-				answersReceived += 1
 			}
+			answersReceived += 1
 
 			if votes > r.clusterSize/2 {
 				go drainChannel(votesChan, r.clusterSize-1-answersReceived)
@@ -182,7 +189,7 @@ func (r *Raft) startElection() {
 }
 
 func (r *Raft) askForVote(ctx context.Context, tdSnapshot *termdata.TermDataSnapshot, member string, voteChan chan<- bool) {
-	conn, err := r.cluster.GetgRPCConnection(ctx, member, 8001)
+	conn, err := r.cluster.GetgRPCConnection(ctx, member, r.rpcPort)
 	if err != nil {
 		log.Printf("Error when dialing to ask for vote: %v", err)
 		return
@@ -236,16 +243,14 @@ func (r *Raft) propagateMessages(ctx context.Context, tdSnapshot *termdata.TermD
 	ctx, _ = context.WithTimeout(ctx, time.Millisecond*60)
 	wg := sync.WaitGroup{}
 	for _, member := range r.cluster.OtherHealthyMembers() {
-		if r.leaderData.GetLastAppendEntries(member.Name).IsZero() {
+		noPreviousAppendEntries := r.leaderData.GetLastAppendEntries(member.Name).IsZero()
+		if noPreviousAppendEntries ||
+			r.log.MaxIndex() >= r.leaderData.GetNextIndex(member.Name) ||
+			time.Since(r.leaderData.GetLastAppendEntries(member.Name)) < time.Millisecond*200 {
+
 			wg.Add(1)
 			go func(node serf.Member) {
-				r.sendAppendEntries(ctx, tdSnapshot, node.Name, true)
-				wg.Done()
-			}(member)
-		} else if r.log.MaxIndex() >= r.leaderData.GetNextIndex(member.Name) || time.Since(r.leaderData.GetLastAppendEntries(member.Name)) < time.Millisecond*200 {
-			wg.Add(1)
-			go func(node serf.Member) {
-				r.sendAppendEntries(ctx, tdSnapshot, node.Name, false)
+				r.sendAppendEntries(ctx, tdSnapshot, node.Name, noPreviousAppendEntries)
 				wg.Done()
 			}(member)
 		}
@@ -254,8 +259,7 @@ func (r *Raft) propagateMessages(ctx context.Context, tdSnapshot *termdata.TermD
 }
 
 func (r *Raft) sendAppendEntries(ctx context.Context, tdSnapshot *termdata.TermDataSnapshot, member string, empty bool) {
-	// TODO: Change 8001 to a const to listen on and to dial to
-	conn, err := r.cluster.GetgRPCConnection(ctx, member, 8001)
+	conn, err := r.cluster.GetgRPCConnection(ctx, member, r.rpcPort)
 	if err != nil {
 		log.Printf("Error when dialing to send append entries: %v", err)
 		return
@@ -372,7 +376,7 @@ func (r *Raft) AppendEntries(ctx context.Context, req *raft.AppendEntriesRequest
 		}, nil
 	}
 
-	if req.Term < tdSnapshot.Term {
+	if req.Term > tdSnapshot.Term {
 		log.Println("Becoming follower because of term override")
 		r.becomeFollower(tdSnapshot.Term, req.Term)
 	}
@@ -386,7 +390,12 @@ func (r *Raft) AppendEntries(ctx context.Context, req *raft.AppendEntriesRequest
 		log.Fatal("Received append entries, even though I'm the leader with the current term.")
 	}
 
-	r.termData.SetLeader(req.LeaderID)
+	if success := r.termData.SetLeader(req.Term, req.LeaderID); !success {
+		return &raft.AppendEntriesResponse{
+			Term:    r.termData.GetTerm(),
+			Success: false,
+		}, nil
+	}
 	r.resetElectionTimeout()
 
 	if !r.log.Exists(req.PrevLogIndex, req.PrevLogTerm) && req.PrevLogIndex != 0 {
@@ -414,7 +423,7 @@ func (r *Raft) AppendEntries(ctx context.Context, req *raft.AppendEntriesRequest
 		}
 
 		if shouldInsert {
-			r.log.Append(req.Entry, req.Term)
+			r.log.Append(req.Entry)
 			log.Println("*************** Added new entry to my log")
 		}
 	}
@@ -495,7 +504,7 @@ func (r *Raft) NewEntry(ctx context.Context, entry *raft.Entry) (*raft.EntryResp
 		for _, member := range r.cluster.OtherMembers() {
 			if member.Name == tdSnapshot.Leader {
 				log.Printf("Redirecting new entry to leader: %v", tdSnapshot.Leader)
-				conn, err := r.cluster.GetgRPCConnection(ctx, member.Name, 8001)
+				conn, err := r.cluster.GetgRPCConnection(ctx, member.Name, r.rpcPort)
 				if err != nil {
 					log.Printf("Error when dialing to send append entries: %v", err)
 					return nil, err
@@ -512,7 +521,7 @@ func (r *Raft) NewEntry(ctx context.Context, entry *raft.Entry) (*raft.EntryResp
 	entry.Term = tdSnapshot.Term
 
 	log.Println("****** Adding new entry to log as leader.")
-	entryIndex, err := r.log.Append(entry, tdSnapshot.Term)
+	entryIndex, err := r.log.Append(entry)
 	if err != nil {
 		return nil, errors.Wrap(err, "Couldn't append entry to my log")
 	}
