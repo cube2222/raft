@@ -1,8 +1,8 @@
 package raft
 
 import (
-	"time"
 	"sync"
+	"time"
 )
 
 type leaderData struct {

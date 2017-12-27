@@ -10,7 +10,6 @@ import (
 	"github.com/cube2222/raft/cluster"
 	"github.com/cube2222/raft/raft/entrylog"
 	"github.com/cube2222/raft/raft/termdata"
-	"github.com/hashicorp/serf/serf"
 	"github.com/pkg/errors"
 	"github.com/satori/go.uuid"
 	"github.com/uber-go/atomic"
@@ -249,10 +248,10 @@ func (r *Raft) propagateMessages(ctx context.Context, tdSnapshot *termdata.TermD
 			time.Since(r.leaderData.GetLastAppendEntries(member.Name)) < time.Millisecond*200 {
 
 			wg.Add(1)
-			go func(node serf.Member) {
-				r.sendAppendEntries(ctx, tdSnapshot, node.Name, noPreviousAppendEntries)
+			go func(memberName string) {
+				r.sendAppendEntries(ctx, tdSnapshot, memberName, noPreviousAppendEntries)
 				wg.Done()
-			}(member)
+			}(member.Name)
 		}
 	}
 	wg.Wait()

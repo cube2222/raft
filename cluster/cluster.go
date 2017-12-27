@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/cube2222/raft/grpccache"
+	grpccache "github.com/cube2222/grpc-connection-cache"
 	"github.com/hashicorp/serf/serf"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
