@@ -37,7 +37,8 @@ type Raft struct {
 	lastApplied int64
 
 	// On leader, reinitialized after election
-	leaderData *leaderData
+	leaderData      *leaderData
+	leaderDataMutex sync.RWMutex
 
 	// On non-leader
 	electionTimeout time.Time
@@ -235,17 +236,29 @@ func (r *Raft) initializeLeadership(ctx context.Context, term int64) {
 		return
 	}
 
-	r.leaderData = NewLeaderData(r.log.MaxIndex())
+	r.setLeaderData(NewLeaderData(r.log.MaxIndex()))
+}
+
+func (r *Raft) getLeaderData() *leaderData {
+	r.leaderDataMutex.RLock()
+	defer r.leaderDataMutex.RUnlock()
+	return r.leaderData
+}
+
+func (r *Raft) setLeaderData(newLeaderData *leaderData) {
+	r.leaderDataMutex.Lock()
+	defer r.leaderDataMutex.Unlock()
+	r.leaderData = newLeaderData
 }
 
 func (r *Raft) propagateMessages(ctx context.Context, tdSnapshot *termdata.TermDataSnapshot) {
 	ctx, _ = context.WithTimeout(ctx, time.Millisecond*60)
 	wg := sync.WaitGroup{}
 	for _, member := range r.cluster.OtherHealthyMembers() {
-		noPreviousAppendEntries := r.leaderData.GetLastAppendEntries(member.Name).IsZero()
+		noPreviousAppendEntries := r.getLeaderData().GetLastAppendEntries(member.Name).IsZero()
 		if noPreviousAppendEntries ||
-			r.log.MaxIndex() >= r.leaderData.GetNextIndex(member.Name) ||
-			time.Since(r.leaderData.GetLastAppendEntries(member.Name)) < time.Millisecond*200 {
+			r.log.MaxIndex() >= r.getLeaderData().GetNextIndex(member.Name) ||
+			time.Since(r.getLeaderData().GetLastAppendEntries(member.Name)) < time.Millisecond*200 {
 
 			wg.Add(1)
 			go func(memberName string) {
@@ -266,7 +279,7 @@ func (r *Raft) sendAppendEntries(ctx context.Context, tdSnapshot *termdata.TermD
 
 	cli := raft.NewRaftClient(conn)
 
-	nextIndex := r.leaderData.GetNextIndex(member)
+	nextIndex := r.getLeaderData().GetNextIndex(member)
 	prevIndex := nextIndex - 1
 	var prevTerm int64 = 0
 	entry, _ := r.log.Get(prevIndex)
@@ -297,7 +310,7 @@ func (r *Raft) sendAppendEntries(ctx context.Context, tdSnapshot *termdata.TermD
 		return
 	}
 
-	r.leaderData.NoteAppendEntries(member)
+	r.getLeaderData().NoteAppendEntries(member)
 
 	if tdSnapshot.Term < res.Term {
 		log.Println("Becoming follower because of term override")
@@ -307,14 +320,14 @@ func (r *Raft) sendAppendEntries(ctx context.Context, tdSnapshot *termdata.TermD
 
 	if res.Success {
 		if payload != nil {
-			r.leaderData.SetNextIndex(member, nextIndex, nextIndex+1)
-			r.leaderData.NoteMatchIndex(member, nextIndex)
+			r.getLeaderData().SetNextIndex(member, nextIndex, nextIndex+1)
+			r.getLeaderData().NoteMatchIndex(member, nextIndex)
 		} else {
-			r.leaderData.NoteMatchIndex(member, prevIndex)
+			r.getLeaderData().NoteMatchIndex(member, prevIndex)
 		}
 	} else {
 		if nextIndex != 1 {
-			r.leaderData.SetNextIndex(member, nextIndex, nextIndex-1)
+			r.getLeaderData().SetNextIndex(member, nextIndex, nextIndex-1)
 		}
 	}
 }
@@ -338,10 +351,10 @@ func (r *Raft) updateCommitIndex() {
 
 		oks := 1
 		for _, node := range r.cluster.OtherMembers() {
-			if r.leaderData.GetMatchIndex(node.Name) >= candidate {
+			if r.getLeaderData().GetMatchIndex(node.Name) >= candidate {
 				oks += 1
 			} else {
-				log.Printf("****** Node %v match index is too low: %v", node.Name, r.leaderData.GetMatchIndex(node.Name))
+				log.Printf("****** Node %v match index is too low: %v", node.Name, r.getLeaderData().GetMatchIndex(node.Name))
 			}
 		}
 		if oks > r.clusterSize/2 {
