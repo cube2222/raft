@@ -8,6 +8,8 @@ type CommitLog interface {
 	DeleteFrom(index int) error
 	Append(*Entry) (int, error)
 	MaxIndex() (int, error)
+	Lock()
+	Unlock()
 }
 
 var ErrNoSuchEntry = errors.New("No such entry")
