@@ -21,8 +21,8 @@ type Cluster interface {
 var ErrNoMessages = errors.New("No messages waiting")
 
 type Message struct {
-	Sender          Node
-	Term            int
+	Sender Node
+	Term   int
 
 	// Left for implementation details
 	Metadata interface{}
@@ -55,6 +55,8 @@ func (msg *AppendEntries) Respond(sender Node, term int, response *AppendEntries
 	response.Sender = sender
 	response.Term = term
 	response.Metadata = msg.Metadata
+	response.PreviousIndex = msg.PreviousLogIndex
+	response.MaxEntryIndex = msg.PreviousLogIndex + len(msg.Entries)
 	msg.responseChannel <- response
 
 	msg.responseChannel = nil
@@ -76,6 +78,9 @@ func (msg *AppendEntries) RespondError(err error) error {
 
 type AppendEntriesResponse struct {
 	Message
+
+	MaxEntryIndex int
+	PreviousIndex int
 
 	Success bool
 }

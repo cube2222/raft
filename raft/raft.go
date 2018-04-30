@@ -44,8 +44,7 @@ func (r *Raft) handleMessages() error {
 		}
 		if err == nil {
 			if err := r.handleVote(vote); err != nil {
-				// TODO: respond
-				panic("not yet implemented")
+				log.Printf("Error handling vote: %v", err)
 			}
 			continue
 		}
@@ -55,13 +54,16 @@ func (r *Raft) handleMessages() error {
 			return errors.Wrap(err, "couldn't receive messages")
 		}
 		if err == nil {
-			if vote, err := r.handleVoteRequest(voteRequest); err != nil {
-				// TODO: respond
-				panic("not yet implemented")
-			} else {
-				// TODO: respond
-				panic("not yet implemented")
-				log.Println(vote)
+			vote, err := r.handleVoteRequest(voteRequest)
+			if err != nil {
+				if err := voteRequest.RespondError(err); err != nil {
+					log.Printf("couldn't respond with vote request handling error: %v", err)
+				}
+				continue
+			}
+
+			if err := voteRequest.Respond(r.cluster.Self(), r.termState.GetTerm(), vote); err != nil {
+				log.Printf("couldn't respond with vote: %v", err)
 			}
 			continue
 		}
@@ -72,8 +74,7 @@ func (r *Raft) handleMessages() error {
 		}
 		if err == nil {
 			if err := r.handleAppendEntriesResponse(appendEntriesResponse); err != nil {
-				// TODO: respond
-				panic("not yet implemented")
+				log.Printf("Error handling append entries response: %v", err)
 			}
 			continue
 		}
@@ -83,13 +84,16 @@ func (r *Raft) handleMessages() error {
 			return errors.Wrap(err, "couldn't receive messages")
 		}
 		if err == nil {
-			if vote, err := r.handleAppendEntries(appendEntries); err != nil {
-				// TODO: respond
-				panic("not yet implemented")
-			} else {
-				// TODO: respond
-				panic("not yet implemented")
-				log.Println(vote)
+			appendEntriesResponse, err := r.handleAppendEntries(appendEntries)
+			if err != nil {
+				if err := appendEntries.RespondError(err); err != nil {
+					log.Printf("couldn't respond with append entries handling error: %v", err)
+				}
+				continue
+			}
+
+			if err := appendEntries.Respond(r.cluster.Self(), r.termState.GetTerm(), appendEntriesResponse); err != nil {
+				log.Printf("couldn't respond with append entries response: %v", err)
 			}
 			continue
 		}
@@ -191,14 +195,6 @@ func (r *Raft) handleAppendEntries(msg *raft.AppendEntries) (*raft.AppendEntries
 	return &raft.AppendEntriesResponse{
 		Success: true,
 	}, nil
-}
-
-func (r *Raft) respondAppendEntries(msg *raft.AppendEntries, res *raft.AppendEntriesResponse) error {
-	return msg.Respond(r.cluster.Self(), r.termState.GetTerm(), res)
-}
-
-func (r *Raft) respondAppendEntriesErr(msg *raft.AppendEntries, err error) error {
-	return msg.RespondError(err)
 }
 
 func (r *Raft) handleAppendEntriesResponse(msg *raft.AppendEntriesResponse) error {
