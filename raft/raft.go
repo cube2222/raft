@@ -11,12 +11,14 @@ import (
 type Raft struct {
 	config *raft.Config
 
-	commitIndex  int
-	lastCommited int
+	commitIndex int
+	lastApplied int
 
 	cluster   raft.Cluster
 	commitLog raft.CommitLog
 	termState raft.TermState
+
+	applyEntries chan *raft.Entry
 }
 
 func (r *Raft) Run() {
@@ -33,7 +35,46 @@ func getTermDebugInfo(state raft.TermState) string {
 }
 
 func (r *Raft) loop() error {
-	panic("not yet implemented")
+	if err := r.handleMessages(); err != nil {
+		return errors.Wrap(err, "couldn't handle messages")
+	}
+
+	if r.commitIndex > r.lastApplied {
+		endIndex, err := r.commitLog.MaxIndex()
+		if err != nil {
+			return errors.Wrap(err, "couldn't get highest index of commit log")
+		}
+
+		for r.lastApplied < endIndex {
+			toBeApplied := r.lastApplied + 1
+			entry, err := r.commitLog.Get(toBeApplied)
+			if err != nil {
+				return errors.Wrap(err, "couldn't get entry to apply from the commit log")
+			}
+
+			r.applyEntries <- entry
+
+			r.lastApplied = toBeApplied
+		}
+	}
+
+	if r.termState.GetRole() == raft.Follower || r.termState.GetRole() == raft.Candidate {
+		if r.termState.ShouldInitiateElection() {
+			if err := r.initiateElection(); err != nil {
+				return errors.Wrap(err, "couldn't initiate election")
+			}
+		}
+	}
+
+	switch r.termState.GetRole() {
+	case raft.Follower:
+	case raft.Candidate:
+	case raft.Leader:
+	}
+}
+
+func (r *Raft) initiateElection() error {
+
 }
 
 func (r *Raft) handleMessages() error {
@@ -142,6 +183,8 @@ func (r *Raft) handleAppendEntries(msg *raft.AppendEntries) (*raft.AppendEntries
 		}, nil
 	}
 
+	r.termState.ResetElectionTimeout()
+
 	// 2. Reply false if log doesn't contain an entry at PreviousLogIndex whose term matches PreviousLogTerm
 	exists, err := r.commitLog.Exists(msg.PreviousLogIndex, msg.PreviousLogTerm)
 	if err != nil {
@@ -198,13 +241,89 @@ func (r *Raft) handleAppendEntries(msg *raft.AppendEntries) (*raft.AppendEntries
 }
 
 func (r *Raft) handleAppendEntriesResponse(msg *raft.AppendEntriesResponse) error {
-	panic("not yet implemented")
+	if err := r.handleTermOverride(&msg.Message); err != nil {
+		return errors.Wrap(err, "couldn't override term")
+	}
+
+	if msg.Term < r.termState.GetTerm() {
+		log.Println("old append entries response")
+		return nil
+	}
+
+	if r.termState.GetRole() != raft.Leader {
+		return errors.New("only the leader should get appen entries responses")
+	}
+
+	// This response is old and irrelevant
+	if r.termState.GetNextIndex(msg.Sender) != msg.PreviousIndex+1 {
+		return nil
+	}
+
+	if msg.Success == false {
+		// Decrement the next index for this node
+		r.termState.SetNextIndex(msg.Sender, msg.PreviousIndex)
+		return nil
+	}
+
+	// msg.Success == true
+	r.termState.SetNextIndex(msg.Sender, msg.MaxEntryIndex+1)
+	r.termState.SetMatchIndex(msg.Sender, msg.MaxEntryIndex)
+
+	return nil
 }
 
 func (r *Raft) handleVoteRequest(msg *raft.VoteRequest) (*raft.Vote, error) {
-	panic("not yet implemented")
+	if err := r.handleTermOverride(&msg.Message); err != nil {
+		return nil, errors.Wrap(err, "couldn't override term")
+	}
+
+	if msg.Term < r.termState.GetTerm() {
+		return &raft.Vote{
+			Granted: false,
+		}, nil
+	}
+
+	maxIndex, err := r.commitLog.MaxIndex()
+	if err != nil {
+		return nil, errors.Wrap(err, "couldn't get commit log max index")
+	}
+
+	lastEntry, err := r.commitLog.Get(maxIndex)
+	if err != nil {
+		return nil, errors.Wrap(err, "couldn't get last entry from commit log")
+	}
+
+	if msg.LastLogIndex < maxIndex || msg.LastLogTerm < lastEntry.Term {
+		return &raft.Vote{
+			Granted: false,
+		}, nil
+	}
+
+	if err := r.termState.VoteFor(msg.Sender); err != nil {
+		return &raft.Vote{
+			Granted: false,
+		}, nil
+	}
+
+	r.termState.ResetElectionTimeout()
+
+	return &raft.Vote{
+		Granted: true,
+	}, nil
 }
 
 func (r *Raft) handleVote(msg *raft.Vote) error {
-	panic("not yet implemented")
+	if err := r.handleTermOverride(&msg.Message); err != nil {
+		return errors.Wrap(err, "couldn't override term")
+	}
+
+	if msg.Term < r.termState.GetTerm() {
+		return errors.New("old vote")
+	}
+
+	if r.termState.GetRole() != raft.Candidate {
+		return nil
+	}
+
+	r.termState.AddVote(msg.Sender)
 }
