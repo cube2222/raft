@@ -38,57 +38,89 @@ func (r *Raft) loop() error {
 
 func (r *Raft) handleMessages() error {
 	for i := 0; i < r.config.MessagesToHandlePerLoop; i++ {
-		msg, err := r.cluster.ReceiveMessage()
+		vote, err := r.cluster.ReceiveVote()
 		if err != nil && err != raft.ErrNoMessages {
 			return errors.Wrap(err, "couldn't receive messages")
 		}
-		if err == raft.ErrNoMessages {
-			return nil
+		if err == nil {
+			if err := r.handleVote(vote); err != nil {
+				// TODO: respond to the vote
+				panic("not yet implemented")
+			}
+			continue
 		}
 
-		if err := r.handleMessage(msg); err != nil {
-			return errors.Wrapf(err, "couldn't handle message %+v", msg)
+		voteRequest, err := r.cluster.ReceiveVoteRequest()
+		if err != nil && err != raft.ErrNoMessages {
+			return errors.Wrap(err, "couldn't receive messages")
+		}
+		if err == nil {
+			if vote, err := r.handleVoteRequest(voteRequest); err != nil {
+				// TODO: respond to the vote
+				panic("not yet implemented")
+			} else {
+				// TODO: respond to the vote
+				panic("not yet implemented")
+				log.Println(vote)
+			}
+			continue
+		}
+
+		appendEntriesResponse, err := r.cluster.ReceiveAppendEntriesResponse()
+		if err != nil && err != raft.ErrNoMessages {
+			return errors.Wrap(err, "couldn't receive messages")
+		}
+		if err == nil {
+			if err := r.handleAppendEntriesResponse(appendEntriesResponse); err != nil {
+				// TODO: respond to the vote
+				panic("not yet implemented")
+			}
+			continue
+		}
+
+		appendEntries, err := r.cluster.ReceiveAppendEntries()
+		if err != nil && err != raft.ErrNoMessages {
+			return errors.Wrap(err, "couldn't receive messages")
+		}
+		if err == nil {
+			if vote, err := r.handleAppendEntries(appendEntries); err != nil {
+				// TODO: respond to the vote
+				panic("not yet implemented")
+			} else {
+				// TODO: respond to the vote
+				panic("not yet implemented")
+				log.Println(vote)
+			}
+			continue
 		}
 	}
 
 	return nil
 }
 
-func (r *Raft) handleMessage(msg *raft.Message) error {
+func (r *Raft) handleTermOverride(msg *raft.Message) error {
 	if msg.Term > r.termState.GetTerm() {
 		if err := r.termState.OverrideTerm(msg.Term); err != nil {
 			return errors.Wrap(err, "couldn't override term")
 		}
 	}
-	// If something just returns an error then this will make sure we send something back.
-	// This is a noop if something has already been sent.
-	defer r.respond(msg, nil)
-
-	switch payload := msg.Payload.(type) {
-	case raft.AppendEntries:
-		return r.handleAppendEntries(msg, &payload)
-	case raft.AppendEntriesResponse:
-		return r.handleAppendEntriesResponse(msg, &payload)
-	case raft.VoteRequest:
-		return r.handleVoteRequest(msg, &payload)
-	case raft.Vote:
-		return r.handleVote(msg, &payload)
-	default:
-		return errors.Errorf("Unknown message type %+v", msg)
-	}
 }
 
-func (r *Raft) handleAppendEntries(msg *raft.Message, payload *raft.AppendEntries) error {
+func (r *Raft) handleAppendEntries(msg *raft.AppendEntries) (*raft.AppendEntriesResponse, error) {
+	if err := r.handleTermOverride(&msg.Message); err != nil {
+		return nil, errors.Wrap(err, "couldn't override term")
+	}
+
 	// 1. Reply false if term < currentTerm
 	if msg.Term < r.termState.GetTerm() {
-		r.termState.SetLeader(payload.Leader)
-		return r.respond(msg, &raft.AppendEntriesResponse{
+		r.termState.SetLeader(msg.Leader)
+		return &raft.AppendEntriesResponse{
 			Success: false,
-		})
+		}, nil
 	}
 
 	if r.termState.GetRole() == raft.Leader {
-		return errors.New("received append entries as leader, this shouldn't happen")
+		return nil, errors.New("received append entries as leader, this shouldn't happen")
 	}
 
 	if r.termState.GetRole() == raft.Candidate {
@@ -96,30 +128,30 @@ func (r *Raft) handleAppendEntries(msg *raft.Message, payload *raft.AppendEntrie
 	}
 
 	if r.termState.GetRole() != raft.Follower {
-		return errors.New("invalid role, handling append entries not as follower")
+		return nil, errors.New("invalid role, handling append entries not as follower")
 	}
 
 	if r.termState.GetLeader() == nil {
-		r.termState.SetLeader(payload.Leader)
-		return r.respond(msg, &raft.AppendEntriesResponse{
+		r.termState.SetLeader(msg.Leader)
+		return &raft.AppendEntriesResponse{
 			Success: false,
-		})
+		}, nil
 	}
 
 	// 2. Reply false if log doesn't contain an entry at PreviousLogIndex whose term matches PreviousLogTerm
-	exists, err := r.commitLog.Exists(payload.PreviousLogIndex, payload.PreviousLogTerm)
+	exists, err := r.commitLog.Exists(msg.PreviousLogIndex, msg.PreviousLogTerm)
 	if err != nil {
-		return errors.Wrapf(err, "couldn't check if log entry with index %v exists", payload.PreviousLogIndex)
+		return nil, errors.Wrapf(err, "couldn't check if log entry with index %v exists", msg.PreviousLogIndex)
 	}
 
-	if !exists && payload.PreviousLogIndex != 0 {
-		return r.respond(msg, &raft.AppendEntriesResponse{
+	if !exists && msg.PreviousLogIndex != 0 {
+		return &raft.AppendEntriesResponse{
 			Success: false,
-		})
+		}, nil
 	}
 
-	nextEntryIndex := payload.PreviousLogIndex + 1
-	for _, newEntry := range payload.Entries {
+	nextEntryIndex := msg.PreviousLogIndex + 1
+	for _, newEntry := range msg.Entries {
 		// 3. If an existing entry conflicts with a new one (same index but different terms),
 		// delete the existing entry and all that follow it
 		entry, err := r.commitLog.Get(nextEntryIndex)
@@ -129,50 +161,54 @@ func (r *Raft) handleAppendEntries(msg *raft.Message, payload *raft.AppendEntrie
 				continue
 			}
 			if err := r.commitLog.DeleteFrom(nextEntryIndex); err != nil {
-				return errors.Wrap(err, "couldn't delete invalid entries")
+				return nil, errors.Wrap(err, "couldn't delete invalid entries")
 			}
 		}
 		if err != nil && err != raft.ErrNoSuchEntry {
-			return errors.Wrapf(err, "couldn't get current entry at index %v", nextEntryIndex)
+			return nil, errors.Wrapf(err, "couldn't get current entry at index %v", nextEntryIndex)
 		}
 
 		// 4. Append any new entries not already in the log
 		if _, err := r.commitLog.Append(&newEntry); err != nil {
-			return errors.Wrap(err, "couldn't append new entry to the commit log")
+			return nil, errors.Wrap(err, "couldn't append new entry to the commit log")
 		}
 	}
 
 	// 5. If leader commit index > commitIndex, set commitIndex = min(leader commit index, index of last new entry)
-	if payload.CommitIndex > r.commitIndex {
+	if msg.CommitIndex > r.commitIndex {
 		maxEntryIndex, err := r.commitLog.MaxIndex()
 		if err != nil {
-			return errors.Wrap(err, "couldn't get max entry index from the commit log")
+			return nil, errors.Wrap(err, "couldn't get max entry index from the commit log")
 		}
 
-		if payload.CommitIndex > maxEntryIndex {
+		if msg.CommitIndex > maxEntryIndex {
 			r.commitIndex = maxEntryIndex
 		} else {
-			r.commitIndex = payload.CommitIndex
+			r.commitIndex = msg.CommitIndex
 		}
 	}
 
-	return r.respond(msg, &raft.AppendEntriesResponse{
+	return &raft.AppendEntriesResponse{
 		Success: true,
-	})
+	}, nil
 }
 
-func (r *Raft) handleAppendEntriesResponse(msg *raft.Message, payload *raft.AppendEntriesResponse) error {
+func (r *Raft) respondAppendEntries(msg *raft.AppendEntries, res *raft.AppendEntriesResponse) error {
+	return msg.Respond(r.cluster.Self(), r.termState.GetTerm(), res)
+}
+
+func (r *Raft) respondAppendEntriesErr(msg *raft.AppendEntries, err error) error {
+	return msg.RespondError(err)
+}
+
+func (r *Raft) handleAppendEntriesResponse(msg *raft.AppendEntriesResponse) error {
 	panic("not yet implemented")
 }
 
-func (r *Raft) handleVoteRequest(msg *raft.Message, payload *raft.VoteRequest) error {
+func (r *Raft) handleVoteRequest(msg *raft.VoteRequest) (*raft.Vote, error) {
 	panic("not yet implemented")
 }
 
-func (r *Raft) handleVote(msg *raft.Message, payload *raft.Vote) error {
+func (r *Raft) handleVote(msg *raft.Vote) error {
 	panic("not yet implemented")
-}
-
-func (r *Raft) respond(msg *raft.Message, payload interface{}) error {
-	return raft.Respond(msg, r.cluster.Self(), r.termState.GetTerm(), payload)
 }
