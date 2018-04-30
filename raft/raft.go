@@ -44,7 +44,7 @@ func (r *Raft) handleMessages() error {
 		}
 		if err == nil {
 			if err := r.handleVote(vote); err != nil {
-				// TODO: respond to the vote
+				// TODO: respond
 				panic("not yet implemented")
 			}
 			continue
@@ -56,10 +56,10 @@ func (r *Raft) handleMessages() error {
 		}
 		if err == nil {
 			if vote, err := r.handleVoteRequest(voteRequest); err != nil {
-				// TODO: respond to the vote
+				// TODO: respond
 				panic("not yet implemented")
 			} else {
-				// TODO: respond to the vote
+				// TODO: respond
 				panic("not yet implemented")
 				log.Println(vote)
 			}
@@ -72,7 +72,7 @@ func (r *Raft) handleMessages() error {
 		}
 		if err == nil {
 			if err := r.handleAppendEntriesResponse(appendEntriesResponse); err != nil {
-				// TODO: respond to the vote
+				// TODO: respond
 				panic("not yet implemented")
 			}
 			continue
@@ -84,10 +84,10 @@ func (r *Raft) handleMessages() error {
 		}
 		if err == nil {
 			if vote, err := r.handleAppendEntries(appendEntries); err != nil {
-				// TODO: respond to the vote
+				// TODO: respond
 				panic("not yet implemented")
 			} else {
-				// TODO: respond to the vote
+				// TODO: respond
 				panic("not yet implemented")
 				log.Println(vote)
 			}
