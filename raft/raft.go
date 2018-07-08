@@ -22,7 +22,6 @@ type Raft struct {
 }
 
 func (r *Raft) Run() {
-
 	for {
 		if err := r.loop(); err != nil {
 			log.Printf("Error while looping: Term State: %v, Error: %v", getTermDebugInfo(r.termState), err)
@@ -70,11 +69,111 @@ func (r *Raft) loop() error {
 	case raft.Follower:
 	case raft.Candidate:
 	case raft.Leader:
+		if err := r.sendAppendEntries(); err != nil {
+			return errors.Wrap(err, "couldn't send append entries")
+		}
+
 	}
+
+	return nil
+}
+
+func (r *Raft) sendAppendEntries() error {
+	lastLogIndex, err := r.commitLog.MaxIndex()
+	if err != nil {
+		return errors.Wrap(err, "couldn't get last log index")
+	}
+
+	for _, node := range r.cluster.GetMembers() {
+		nextIndex := r.termState.GetNextIndex(node)
+
+		if lastLogIndex >= nextIndex || r.termState.ShouldSendHeartbeat(node) {
+			if err := r.sendSingleAppendEntries(node); err != nil {
+				log.Printf("Couldn't send append entries to member %v: %v", node, err)
+				continue
+			}
+		}
+	}
+	return nil
+}
+
+func (r *Raft) sendSingleAppendEntries(node raft.Node) error {
+	r.termState.ResetHeartbeatTimeout(node)
+
+	lastLogIndex, err := r.commitLog.MaxIndex()
+	if err != nil {
+		return errors.Wrap(err, "couldn't get last log index")
+	}
+	entry, err := r.commitLog.Get(lastLogIndex)
+	if err != nil {
+		return errors.Wrap(err, "couldn't get last log entry")
+	}
+
+	previousLogIndex := lastLogIndex
+	previousLogTerm := entry.Term
+
+	var entries []raft.Entry
+	nextIndex := r.termState.GetNextIndex(node)
+	if lastLogIndex >= nextIndex {
+		entry, err := r.commitLog.Get(lastLogIndex)
+		if err != nil {
+			return errors.Wrap(err, "couldn't get nextIndex log entry")
+		}
+
+		previousLogIndex = nextIndex
+		previousLogTerm = entry.Term
+
+		entries = []raft.Entry{*entry}
+	}
+
+	err = r.cluster.SendAppendEntries(&raft.AppendEntries{
+		Message: raft.Message{
+			Sender: r.cluster.Self(),
+			Term:   r.termState.GetTerm(),
+		},
+		Leader:           r.cluster.Self(),
+		PreviousLogIndex: previousLogIndex,
+		PreviousLogTerm:  previousLogTerm,
+		Entries:          entries,
+		CommitIndex:      r.commitIndex,
+	}, node)
+	if err != nil {
+		return errors.Wrapf(err, "couldn't send append entries to member %v", node)
+	}
+
+	return nil
 }
 
 func (r *Raft) initiateElection() error {
+	lastLogIndex, err := r.commitLog.MaxIndex()
+	if err != nil {
+		return errors.Wrap(err, "couldn't get last log index")
+	}
+	lastMessage, err := r.commitLog.Get(lastLogIndex)
+	if err != nil {
+		return errors.Wrap(err, "couldn't get most recent log entry")
+	}
 
+	if err := r.termState.InitiateElection(); err != nil {
+		return errors.Wrap(err, "couldn't initiate election term state")
+	}
+
+	for _, node := range r.cluster.GetMembers() {
+		err := r.cluster.SendVoteRequest(&raft.VoteRequest{
+			Message: raft.Message{
+				Sender: r.cluster.Self(),
+				Term:   r.termState.GetTerm(),
+			},
+			Candidate:    r.cluster.Self(),
+			LastLogIndex: lastLogIndex,
+			LastLogTerm:  lastMessage.Term,
+		}, node)
+		if err != nil {
+			log.Printf("Couldn't send vote request to member %v: %v", node, err)
+		}
+	}
+
+	return nil
 }
 
 func (r *Raft) handleMessages() error {
@@ -144,11 +243,12 @@ func (r *Raft) handleMessages() error {
 }
 
 func (r *Raft) handleTermOverride(msg *raft.Message) error {
-	if msg.Term > r.termState.GetTerm() {
+	if msg.Term >= r.termState.GetTerm() {
 		if err := r.termState.OverrideTerm(msg.Term); err != nil {
 			return errors.Wrap(err, "couldn't override term")
 		}
 	}
+	return nil
 }
 
 func (r *Raft) handleAppendEntries(msg *raft.AppendEntries) (*raft.AppendEntriesResponse, error) {
@@ -166,10 +266,6 @@ func (r *Raft) handleAppendEntries(msg *raft.AppendEntries) (*raft.AppendEntries
 
 	if r.termState.GetRole() == raft.Leader {
 		return nil, errors.New("received append entries as leader, this shouldn't happen")
-	}
-
-	if r.termState.GetRole() == raft.Candidate {
-		r.termState.AbortElection()
 	}
 
 	if r.termState.GetRole() != raft.Follower {
@@ -326,4 +422,41 @@ func (r *Raft) handleVote(msg *raft.Vote) error {
 	}
 
 	r.termState.AddVote(msg.Sender)
+	if r.termState.VoteCount() > len(r.cluster.GetMembers())/2 {
+		if err := r.becomeLeader(); err != nil {
+			return errors.Wrap(err, "couldn't become leader")
+		}
+	}
+	return nil
+}
+
+func (r *Raft) becomeLeader() error {
+	lastLogIndex, err := r.commitLog.MaxIndex()
+	if err != nil {
+		return errors.Wrap(err, "couldn't get last log index")
+	}
+	lastMessage, err := r.commitLog.Get(lastLogIndex)
+	if err != nil {
+		return errors.Wrap(err, "couldn't get most recent log entry")
+	}
+
+	r.termState.BecomeLeader()
+
+	for _, node := range r.cluster.GetMembers() {
+		err := r.cluster.SendAppendEntries(&raft.AppendEntries{
+			Message: raft.Message{
+				Sender: r.cluster.Self(),
+				Term:   r.termState.GetTerm(),
+			},
+			Leader:           r.cluster.Self(),
+			PreviousLogIndex: lastLogIndex,
+			PreviousLogTerm:  lastMessage.Term,
+			Entries:          nil,
+			CommitIndex:      r.commitIndex,
+		}, node)
+		if err != nil {
+			return errors.Wrapf(err, "couldn't send append entries to member %v", node)
+		}
+	}
+	return nil
 }

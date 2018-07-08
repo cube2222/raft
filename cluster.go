@@ -16,6 +16,7 @@ type Cluster interface {
 	ReceiveVote() (*Vote, error)
 	SendAppendEntries(appendEntries *AppendEntries, recipient Node) error
 	SendVoteRequest(voteRequest *VoteRequest, recipient Node) error
+	GetMembers() []Node
 	GetHealthyMembers() []Node
 }
 

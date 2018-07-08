@@ -21,7 +21,6 @@ type TermState interface {
 	GetLeader() *Node
 	SetLeader(Node)
 	BecomeLeader()
-	AbortElection()
 	ResetElectionTimeout()
 	ShouldInitiateElection() bool
 
@@ -30,6 +29,8 @@ type TermState interface {
 	SetNextIndex(node Node, index int)
 	GetMatchIndex(node Node) int
 	SetMatchIndex(node Node, index int)
+	ShouldSendHeartbeat(node Node) bool
+	ResetHeartbeatTimeout(node Node)
 
 	// Volatile candidate
 	VoteCount() int
